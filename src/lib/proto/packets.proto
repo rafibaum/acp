@@ -1,0 +1,24 @@
+syntax = "proto3";
+
+package packets;
+
+message Packet {
+  oneof data {
+    StreamPacket stream = 1;
+    Handshake handshake = 2;
+    Terminate terminate = 3;
+  }
+}
+
+message Handshake {
+  string name = 1;
+}
+
+message Terminate {
+
+}
+
+message StreamPacket {
+  uint32 seq = 1;
+  bytes data = 2;
+}
