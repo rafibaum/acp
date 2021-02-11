@@ -4,9 +4,11 @@
 name = "acp"
 version = "0.1.0"
 dependencies = [
+ "anyhow",
  "bytes",
  "prost",
  "prost-build",
+ "thiserror",
  "tokio",
 ]
 

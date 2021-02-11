@@ -2,9 +2,8 @@
 
 #![warn(missing_docs)]
 
-use prost::alloc::fmt::Formatter;
-use std::error::Error;
-use std::fmt::Display;
+use std::sync::PoisonError;
+use thiserror::Error;
 
 pub mod proto;
 
@@ -12,48 +11,16 @@ pub mod proto;
 pub type Result<T> = std::result::Result<T, AcpError>;
 
 /// Errors which can occur during ACP execution.
-#[derive(Debug)]
+#[derive(Debug, Error)]
 pub enum AcpError {
-    /// Errors raised from internal I/O constructs.
-    IoError(std::io::Error),
-    /// Errors due to a poisoned mutex.
-    PoisonedMutexError,
-    /// Errors during packet decoding
-    PacketDecodeError(prost::DecodeError),
+    /// Used where a mutex was poisoned. The standard library error contains the MutexGuard itself
+    /// which does not implement the Send trait, so this is used to drop that guard entirely.
+    #[error("a mutex was poisoned")]
+    PoisonedMutex,
 }
 
-impl Display for AcpError {
-    fn fmt(&self, f: &mut Formatter<'_>) -> std::fmt::Result {
-        match self {
-            AcpError::IoError(err) => {
-                write!(f, "IO Error: {}", err)
-            }
-            AcpError::PoisonedMutexError => {
-                write!(f, "Internal concurrency error, poisoned mutex!")
-            }
-            AcpError::PacketDecodeError(err) => {
-                write!(f, "Packet decoding error: {}", err)
-            }
-        }
-    }
-}
-
-impl Error for AcpError {}
-
-impl From<std::io::Error> for AcpError {
-    fn from(err: std::io::Error) -> Self {
-        AcpError::IoError(err)
-    }
-}
-
-impl<T> From<std::sync::PoisonError<T>> for AcpError {
-    fn from(_: std::sync::PoisonError<T>) -> Self {
-        AcpError::PoisonedMutexError
-    }
-}
-
-impl From<prost::DecodeError> for AcpError {
-    fn from(err: prost::DecodeError) -> Self {
-        AcpError::PacketDecodeError(err)
+impl<T> From<PoisonError<T>> for AcpError {
+    fn from(_: PoisonError<T>) -> AcpError {
+        AcpError::PoisonedMutex
     }
 }

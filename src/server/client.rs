@@ -4,9 +4,11 @@
 //! channel and processing them as necessary. The client may fully process packets within its own
 //! task or spawn new tasks as necessary, taking responsibility for the lifecycle of spawned tasks.
 
-use crate::{AcpServerError, Result};
+use crate::AcpServerError;
+use anyhow::{Context, Result};
 use libacp::proto::packet::Data;
 use libacp::proto::Packet;
+use libacp::AcpError;
 use prost::alloc::fmt::Formatter;
 use prost::Message;
 use std::collections::HashMap;
@@ -70,7 +72,7 @@ impl Client {
                 ClientState::Authorised => self.authorised(packet)?,
                 ClientState::Terminated => {
                     // We should never come across this state while processing a packet
-                    return Err(AcpServerError::IllegalClientState(self.state));
+                    return Err(AcpServerError::IllegalClientState(self.state).into());
                 }
             }
 
@@ -87,7 +89,7 @@ impl Client {
     fn unauthorised(&mut self, packet: Packet) -> Result<()> {
         let data = match &packet.data {
             Some(data) => data,
-            None => return Err(AcpServerError::MalformedPacket(self.state, packet)),
+            None => return Err(AcpServerError::MalformedPacket(self.state, packet).into()),
         };
 
         // Process payload
@@ -96,7 +98,7 @@ impl Client {
                 println!("Handshake from: {}", handshake.name);
                 self.state = ClientState::Authorised;
             }
-            _ => return Err(AcpServerError::UnexpectedPacket(self.state, packet)),
+            _ => return Err(AcpServerError::UnexpectedPacket(self.state, packet).into()),
         }
 
         Ok(())
@@ -106,7 +108,7 @@ impl Client {
     fn authorised(&mut self, packet: Packet) -> Result<()> {
         let data = match &packet.data {
             Some(data) => data,
-            None => return Err(AcpServerError::MalformedPacket(self.state, packet)),
+            None => return Err(AcpServerError::MalformedPacket(self.state, packet).into()),
         };
 
         // Process payload
@@ -124,7 +126,11 @@ impl Client {
     /// Clean up the client's connection.
     pub(crate) fn terminate(&mut self) -> Result<()> {
         // TODO: Implement explicit client termination signal
-        let mut clients = self.clients.lock()?;
+        let mut clients = self
+            .clients
+            .lock()
+            .map_err(|_| AcpError::PoisonedMutex)
+            .context("Client router mutex was poisoned before termination")?;
         clients.remove(&self.addr);
         self.state = ClientState::Terminated;
         Ok(())

@@ -6,7 +6,8 @@
 //! client error handling.
 
 use crate::client::Client;
-use crate::Result;
+use anyhow::{Context, Result};
+use libacp::AcpError;
 use std::collections::HashMap;
 use std::net::SocketAddr;
 use std::sync::{Arc, Mutex, MutexGuard};
@@ -32,8 +33,10 @@ impl Router {
     ///
     /// # Errors
     /// If the address passed in fails to bind.
-    pub async fn new<A: ToSocketAddrs>(addr: A) -> std::io::Result<Self> {
-        let socket = UdpSocket::bind(addr).await?;
+    pub async fn new<A: ToSocketAddrs>(addr: A) -> Result<Self> {
+        let socket = UdpSocket::bind(addr)
+            .await
+            .context("Could not bind UDP socket to specified address")?;
 
         Ok(Router {
             socket,
@@ -55,7 +58,11 @@ impl Router {
             let (_, addr) = self.socket.recv_from(&mut buf).await?;
 
             // Find client to route to
-            let clients = self.clients.lock()?;
+            let clients = self
+                .clients
+                .lock()
+                .map_err(|_| AcpError::PoisonedMutex)
+                .context("Client router mutex was poisoned before packet processing")?;
             let handle = clients.get(&addr);
 
             match handle {
