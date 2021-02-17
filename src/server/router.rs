@@ -1,114 +1,123 @@
-//! Manages the network socket and routes inbound packets to clients.
-//!
-//! The router is responsible for managing the inbound portion of communication. As UDP is
-//! connectionless, this abstraction is necessary to route UDP datagrams to their respective clients
-//! and set up new clients as handshakes are received. The router is also responsible for top-level
-//! client error handling.
-
 use crate::client::Client;
 use anyhow::{Context, Result};
-use libacp::AcpError;
+use bytes::BytesMut;
+use quiche::ConnectionId;
+use ring::rand::SecureRandom;
 use std::collections::HashMap;
 use std::net::SocketAddr;
-use std::sync::{Arc, Mutex, MutexGuard};
+use std::sync::Arc;
 use tokio::net::{ToSocketAddrs, UdpSocket};
-use tokio::sync::mpsc;
-use tokio::sync::mpsc::UnboundedSender;
+use tokio::sync::mpsc::{unbounded_channel, UnboundedSender};
 
-/// Router controller.
-pub(crate) struct Router {
-    /// Socket this server listens on.
-    socket: UdpSocket,
-    /// Map of clients from their addresses to their inbound receiver channels.
-    ///
-    /// This is the main data structure used to map inbound datagrams to their respective clients.
-    /// It's wrapped in a [`Mutex`] as clients need access to prune themselves from the map once
-    /// they're terminated.
-    // TODO: Replace mutex with message passing
-    clients: Arc<Mutex<HashMap<SocketAddr, UnboundedSender<Vec<u8>>>>>,
+pub const DATAGRAM_SIZE: usize = u16::MAX as usize;
+
+pub struct Router {
+    socket: Arc<UdpSocket>,
+    quic_config: quiche::Config,
+    handles: HashMap<ConnectionId<'static>, Handle>,
+    rng: ring::rand::SystemRandom,
+    recv_buf: BytesMut,
+}
+
+struct Handle {
+    tx: UnboundedSender<BytesMut>,
 }
 
 impl Router {
-    /// Binds the socket and, if successful, constructs a new router.
-    ///
-    /// # Errors
-    /// If the address passed in fails to bind.
-    pub async fn new<A: ToSocketAddrs>(addr: A) -> Result<Self> {
-        let socket = UdpSocket::bind(addr)
-            .await
-            .context("Could not bind UDP socket to specified address")?;
+    pub async fn new<A: ToSocketAddrs>(bind_addr: A, quic_config: quiche::Config) -> Result<Self> {
+        let socket = Arc::new(
+            UdpSocket::bind(bind_addr)
+                .await
+                .context("Could not bind server socket to address")?,
+        );
+
+        let mut recv_buf = BytesMut::new();
+        recv_buf.resize(DATAGRAM_SIZE, 0);
 
         Ok(Router {
             socket,
-            clients: Arc::new(Mutex::new(HashMap::new())),
+            quic_config,
+            handles: HashMap::new(),
+            rng: ring::rand::SystemRandom::new(),
+            recv_buf,
         })
     }
 
-    /// Main loop of the router.
-    ///
-    /// Takes incoming packets and maps them to the appropriate clients, setting up new clients
-    /// where necessary.
-    pub async fn process(&mut self) -> Result<()> {
+    pub async fn run(mut self) -> Result<()> {
         loop {
-            // Construct a vec that can handle the maximum size of a UDP datagram. This will be
-            // passed around amongst tasks so heap allocating makes sense (and this would blow out
-            // the stack at this size anyways).
-            let mut buf = vec![0; u16::MAX as usize];
-
-            let (_, addr) = self.socket.recv_from(&mut buf).await?;
-
-            // Find client to route to
-            let clients = self
-                .clients
-                .lock()
-                .map_err(|_| AcpError::PoisonedMutex)
-                .context("Client router mutex was poisoned before packet processing")?;
-            let handle = clients.get(&addr);
-
-            match handle {
-                // Client may have been found
-                Some(handle) => {
-                    if let Err(e) = handle.send(buf) {
-                        // Old handle has no open clients, set up new connection instead
-                        self.handshake(clients, addr, e.0);
-                    }
-                }
-
-                // No client, start handshake
-                None => {
-                    self.handshake(clients, addr, buf);
-                }
-            }
+            self.poll_socket().await?
         }
     }
 
-    /// Sets up a new client.
-    fn handshake(
-        &self,
-        mut clients: MutexGuard<'_, HashMap<SocketAddr, UnboundedSender<Vec<u8>>>>,
-        addr: SocketAddr,
-        buf: Vec<u8>,
-    ) {
-        let (client_tx, client_rx) = mpsc::unbounded_channel();
-        // We should never get this error but I don't want unwrap in here at all
-        client_tx
-            .send(buf)
-            .expect("Handshake receiver dropped out of scope");
-        clients.insert(addr, client_tx);
+    async fn poll_socket(&mut self) -> Result<()> {
+        let (len, addr) = self
+            .socket
+            .recv_from(&mut self.recv_buf)
+            .await
+            .context("Failure while listening to server socket")?;
+        let header =
+            match quiche::Header::from_slice(&mut self.recv_buf[..len], quiche::MAX_CONN_ID_LEN) {
+                Ok(header) => header,
+                Err(_) => return Ok(()),
+            };
 
-        // Drop the mutex lock, create HashMap reference for client handle
-        let clients = self.clients.clone();
+        let mut buf = BytesMut::new();
+        buf.resize(DATAGRAM_SIZE, 0);
+        std::mem::swap(&mut self.recv_buf, &mut buf);
+        buf.resize(len, 0);
 
-        // Spawn the client and manage top-level errors
-        tokio::spawn(async move {
-            let mut client = Client::new(client_rx, clients, addr);
-
-            if let Err(e) = client.process().await {
-                println!("Client at {} encountered an error: {}", client.addr(), e);
-                if let Err(poisoned) = client.terminate() {
-                    println!("Couldn't terminate client gracefully: {}", poisoned);
+        if let Err(_e) = match self.handles.get(&header.dcid) {
+            Some(handle) => {
+                match handle.tx.send(buf) {
+                    Ok(()) => Ok(()),
+                    Err(e) => {
+                        // Client dropped, run a handshake instead
+                        self.handshake(addr, &header, e.0)
+                    }
                 }
             }
+            None => self.handshake(addr, &header, buf),
+        } {}
+
+        Ok(())
+    }
+
+    fn handshake(
+        &mut self,
+        addr: SocketAddr,
+        header: &quiche::Header,
+        buf: BytesMut,
+    ) -> Result<()> {
+        if header.ty != quiche::Type::Initial {
+            return Ok(());
+        }
+
+        let mut scid = vec![0; quiche::MAX_CONN_ID_LEN];
+        self.rng.fill(&mut scid).unwrap(); // Rng should always succeed
+        let scid = ConnectionId::from_vec(scid);
+
+        let (tx, rx) = unbounded_channel();
+        tx.send(buf).unwrap(); // Receiver is in scope
+
+        let connection = quiche::accept(&scid, None, &mut self.quic_config)
+            .context("Failed to initialise QUIC connection to client")?;
+        let handle = Handle::new(tx);
+        self.handles.insert(scid, handle);
+
+        let client = Client::new(self.socket.clone(), addr, connection, rx);
+
+        tokio::spawn(async move {
+            if let Err(e) = client.run().await {
+                eprintln!("Client error: {}", e);
+            }
         });
+
+        Ok(())
+    }
+}
+
+impl Handle {
+    fn new(tx: UnboundedSender<BytesMut>) -> Self {
+        Handle { tx }
     }
 }

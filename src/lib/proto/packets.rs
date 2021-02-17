@@ -1,6 +1,6 @@
 #[derive(Clone, PartialEq, ::prost::Message)]
 pub struct Packet {
-    #[prost(oneof = "packet::Data", tags = "1, 2, 3")]
+    #[prost(oneof = "packet::Data", tags = "1")]
     pub data: ::core::option::Option<packet::Data>,
 }
 /// Nested message and enum types in `Packet`.
@@ -8,24 +8,46 @@ pub mod packet {
     #[derive(Clone, PartialEq, ::prost::Oneof)]
     pub enum Data {
         #[prost(message, tag = "1")]
-        Stream(super::StreamPacket),
-        #[prost(message, tag = "2")]
-        Handshake(super::Handshake),
-        #[prost(message, tag = "3")]
-        Terminate(super::Terminate),
+        Ping(super::Ping),
     }
 }
 #[derive(Clone, PartialEq, ::prost::Message)]
-pub struct Handshake {
+pub struct Ping {
     #[prost(string, tag = "1")]
-    pub name: ::prost::alloc::string::String,
+    pub data: ::prost::alloc::string::String,
 }
 #[derive(Clone, PartialEq, ::prost::Message)]
-pub struct Terminate {}
-#[derive(Clone, PartialEq, ::prost::Message)]
-pub struct StreamPacket {
-    #[prost(uint32, tag = "1")]
-    pub seq: u32,
+pub struct ValidationToken {
+    #[prost(bytes = "vec", tag = "1")]
+    pub payload: ::prost::alloc::vec::Vec<u8>,
     #[prost(bytes = "vec", tag = "2")]
-    pub data: ::prost::alloc::vec::Vec<u8>,
+    pub signature: ::prost::alloc::vec::Vec<u8>,
+}
+#[derive(Clone, PartialEq, ::prost::Message)]
+pub struct ValidationPayload {
+    #[prost(bytes = "vec", tag = "1")]
+    pub salt: ::prost::alloc::vec::Vec<u8>,
+    #[prost(uint64, tag = "2")]
+    pub secs: u64,
+    #[prost(message, optional, tag = "3")]
+    pub address: ::core::option::Option<IpAddress>,
+    #[prost(uint32, tag = "4")]
+    pub port: u32,
+    #[prost(bytes = "vec", tag = "5")]
+    pub dcid: ::prost::alloc::vec::Vec<u8>,
+}
+#[derive(Clone, PartialEq, ::prost::Message)]
+pub struct IpAddress {
+    #[prost(oneof = "ip_address::Address", tags = "1, 2")]
+    pub address: ::core::option::Option<ip_address::Address>,
+}
+/// Nested message and enum types in `IpAddress`.
+pub mod ip_address {
+    #[derive(Clone, PartialEq, ::prost::Oneof)]
+    pub enum Address {
+        #[prost(bytes, tag = "1")]
+        V4(::prost::alloc::vec::Vec<u8>),
+        #[prost(bytes, tag = "2")]
+        V6(::prost::alloc::vec::Vec<u8>),
+    }
 }

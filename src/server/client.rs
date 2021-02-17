@@ -1,164 +1,178 @@
-//! Controls communication between the server and a single client.
-//!
-//! The client is responsible for receiving packets from the [router](crate::router) through a
-//! channel and processing them as necessary. The client may fully process packets within its own
-//! task or spawn new tasks as necessary, taking responsibility for the lifecycle of spawned tasks.
-
-use crate::AcpServerError;
-use anyhow::{Context, Result};
+use crate::router;
+use anyhow::Result;
+use bytes::{Buf, BytesMut};
+use libacp::proto;
 use libacp::proto::packet::Data;
-use libacp::proto::Packet;
-use libacp::AcpError;
-use prost::alloc::fmt::Formatter;
+use libacp::proto::{Packet, Ping};
 use prost::Message;
 use std::collections::HashMap;
-use std::fmt::Display;
 use std::net::SocketAddr;
-use std::sync::{Arc, Mutex};
-use tokio::sync::mpsc::{UnboundedReceiver, UnboundedSender};
+use std::pin::Pin;
+use std::sync::Arc;
+use thiserror::Error;
+use tokio::net::UdpSocket;
+use tokio::sync::mpsc::UnboundedReceiver;
+use tokio::time::timeout;
 
-/// Client controller.
-pub(crate) struct Client {
-    /// Channel of bytes received from this client.
-    input: UnboundedReceiver<Vec<u8>>,
-    /// List of clients from the [router](crate::router). Used to remove this client from the router
-    /// on termination.
-    clients: Arc<Mutex<HashMap<SocketAddr, UnboundedSender<Vec<u8>>>>>,
-    /// Address of the client.
-    // TODO: Replace with a session identifier
+pub struct Client {
+    socket: Arc<UdpSocket>,
     addr: SocketAddr,
-    /// Current state of the client's connection.
-    state: ClientState,
+    connection: Pin<Box<quiche::Connection>>,
+    rx: UnboundedReceiver<BytesMut>,
+    send_buf: BytesMut,
+    stream_bufs: HashMap<u64, BytesMut>,
 }
 
 impl Client {
-    /// Constructs a new client.
     pub fn new(
-        client_rx: UnboundedReceiver<Vec<u8>>,
-        clients: Arc<Mutex<HashMap<SocketAddr, UnboundedSender<Vec<u8>>>>>,
+        socket: Arc<UdpSocket>,
         addr: SocketAddr,
+        connection: Pin<Box<quiche::Connection>>,
+        rx: UnboundedReceiver<BytesMut>,
     ) -> Self {
+        let mut send_buf = BytesMut::with_capacity(router::DATAGRAM_SIZE);
+        send_buf.resize(router::DATAGRAM_SIZE, 0);
+
         Client {
-            input: client_rx,
-            clients,
+            socket,
             addr,
-            state: ClientState::Unauthorised,
+            connection,
+            send_buf,
+            rx,
+            stream_bufs: HashMap::new(),
         }
     }
 
-    /// Returns the IP address of the client.
-    pub fn addr(&self) -> SocketAddr {
-        self.addr
-    }
-
-    /// The main loop of the client task.
-    pub async fn process(&mut self) -> Result<()> {
+    pub async fn run(mut self) -> Result<()> {
+        self.send().await?; // Acknowledge the established connection
         loop {
-            let data = match self.input.recv().await {
-                Some(data) => data,
-                None => {
-                    // TODO: Terminate client connection
-                    // Right now we don't have client-side termination so we should just close out
-                    self.terminate()?;
-                    break;
-                }
-            };
+            self.recv().await?; // Receive new data into the connection
+            self.send().await?; // Respond as necessary
 
-            let packet: Packet = Packet::decode_length_delimited(&data[..])?;
-
-            // Dispatch packet to different handler depending on client state
-            match self.state {
-                ClientState::Unauthorised => self.unauthorised(packet)?,
-                ClientState::Authorised => self.authorised(packet)?,
-                ClientState::Terminated => {
-                    // We should never come across this state while processing a packet
-                    return Err(AcpServerError::IllegalClientState(self.state).into());
-                }
-            }
-
-            // Stop processing packets if handlers terminated our connection
-            if self.state == ClientState::Terminated {
+            if self.connection.is_closed() {
                 break;
             }
+
+            if self.connection.is_established() && !self.connection.is_draining() {
+                self.read_streams().await?;
+            }
         }
 
         Ok(())
     }
 
-    /// Handles incoming packets while the client is unauthorised.
-    fn unauthorised(&mut self, packet: Packet) -> Result<()> {
-        let data = match &packet.data {
-            Some(data) => data,
-            None => return Err(AcpServerError::MalformedPacket(self.state, packet).into()),
+    async fn read_streams(&mut self) -> Result<()> {
+        const QUEUE_BUMP_SIZE: usize = 1024;
+
+        println!("Reading streams");
+        for stream_id in self.connection.readable() {
+            println!("Receiving data for stream: {}", stream_id);
+            let mut buf = self
+                .stream_bufs
+                .remove(&stream_id)
+                .unwrap_or_else(|| BytesMut::new());
+            let mut len = buf.len();
+            buf.resize(len + QUEUE_BUMP_SIZE, 0);
+
+            while let Ok((read, fin)) = self.connection.stream_recv(stream_id, &mut buf[len..]) {
+                //TODO: Handle fin
+                len += read;
+                buf.resize(len + QUEUE_BUMP_SIZE, 0);
+            }
+
+            buf.resize(len, 0);
+
+            while let Some(packet) = proto::frame(&mut buf).unwrap() {
+                // TODO: Handle
+                self.process(stream_id, packet).await?;
+            }
+
+            self.stream_bufs.insert(stream_id, buf);
+        }
+
+        Ok(())
+    }
+
+    async fn process(&mut self, stream_id: u64, packet: Packet) -> Result<()> {
+        match packet.data.unwrap() {
+            //TODO: Handle
+            Data::Ping(ping) => {
+                let response = Packet::new(Data::Ping(Ping { data: ping.data }));
+                println!("Sending ping response");
+                self.send_packet(stream_id, response).await
+            }
+        }
+    }
+
+    async fn close(&mut self, app: bool, err: u64, reason: &[u8]) -> Result<()> {
+        self.connection.close(app, err, reason)?;
+        self.send().await?;
+        Ok(())
+    }
+
+    async fn send_packet(&mut self, stream_id: u64, packet: Packet) -> Result<()> {
+        let mut buf = BytesMut::new();
+        packet.encode_length_delimited(&mut buf)?;
+        while buf.remaining() > 0 {
+            buf.advance(self.connection.stream_send(stream_id, &buf[..], false)?);
+        }
+
+        self.send().await
+    }
+
+    async fn send(&mut self) -> Result<()> {
+        loop {
+            let len = match self.connection.send(&mut self.send_buf) {
+                Ok(len) => len,
+                Err(quiche::Error::Done) => {
+                    return Ok(());
+                }
+                Err(e) => return Err(e.into()),
+            };
+
+            let mut sent = 0;
+            while sent < len {
+                let written = self
+                    .socket
+                    .send_to(&self.send_buf[sent..len], self.addr)
+                    .await?;
+                sent += written;
+            }
+        }
+    }
+
+    async fn recv(&mut self) -> std::result::Result<(), RecvError> {
+        let socket_future = self.rx.recv();
+        let bytes = match self.connection.timeout() {
+            Some(duration) => match timeout(duration, socket_future).await {
+                Ok(bytes) => bytes,
+                Err(_) => {
+                    self.connection.on_timeout();
+                    return Ok(());
+                }
+            },
+            None => socket_future.await,
         };
 
-        // Process payload
-        match data {
-            Data::Handshake(handshake) => {
-                println!("Handshake from: {}", handshake.name);
-                self.state = ClientState::Authorised;
-            }
-            _ => return Err(AcpServerError::UnexpectedPacket(self.state, packet).into()),
-        }
-
-        Ok(())
-    }
-
-    /// Handles incoming packets while the client is authorised.
-    fn authorised(&mut self, packet: Packet) -> Result<()> {
-        let data = match &packet.data {
-            Some(data) => data,
-            None => return Err(AcpServerError::MalformedPacket(self.state, packet).into()),
+        let mut bytes = match bytes {
+            Some(bytes) => bytes,
+            None => return Err(RecvError::DroppedChannel),
         };
 
-        // Process payload
-        match data {
-            Data::Terminate(_) => {
-                println!("Terminating");
-                self.terminate()?;
+        match self.connection.recv(&mut bytes) {
+            Ok(len) => {
+                println!("Client: QUIC read {} out of {}", len, bytes.len());
+                Ok(())
             }
-            _ => println!("Unexpected packet encountered while authorised"),
+            Err(e) => Err(e.into()),
         }
-
-        Ok(())
-    }
-
-    /// Clean up the client's connection.
-    pub(crate) fn terminate(&mut self) -> Result<()> {
-        // TODO: Implement explicit client termination signal
-        let mut clients = self
-            .clients
-            .lock()
-            .map_err(|_| AcpError::PoisonedMutex)
-            .context("Client router mutex was poisoned before termination")?;
-        clients.remove(&self.addr);
-        self.state = ClientState::Terminated;
-        Ok(())
     }
 }
 
-/// Represents the current state of the client's connection.
-///
-/// Packets may need to be processed differently depending on if a user is authorised or not, so
-/// this enum is used to track state for the client.
-#[derive(Copy, Clone, PartialEq, Eq, Debug, Hash)]
-pub enum ClientState {
-    /// Awaiting client handshake.
-    Unauthorised,
-    /// Client fully connected.
-    Authorised,
-    /// Connection with client has been terminated.
-    Terminated,
-}
-
-impl Display for ClientState {
-    fn fmt(&self, f: &mut Formatter<'_>) -> std::fmt::Result {
-        let name = match self {
-            ClientState::Unauthorised => "Unauthorised",
-            ClientState::Authorised => "Authorised",
-            ClientState::Terminated => "Terminated",
-        };
-
-        write!(f, "{}", name)
-    }
+#[derive(Error, Debug)]
+enum RecvError {
+    #[error("client's receiver channel has been dropped")]
+    DroppedChannel,
+    #[error(transparent)]
+    QuicError(#[from] quiche::Error),
 }

@@ -17,6 +17,9 @@ pub enum AcpError {
     /// which does not implement the Send trait, so this is used to drop that guard entirely.
     #[error("a mutex was poisoned")]
     PoisonedMutex,
+    /// Represents an error occurring during the protocol buffers decoding step.
+    #[error("packet decode error")]
+    PacketDecodeError(#[from] prost::DecodeError),
 }
 
 impl<T> From<PoisonError<T>> for AcpError {
