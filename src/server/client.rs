@@ -159,7 +159,7 @@ impl Client {
     }
 
     #[tracing::instrument(level = "trace", skip(self))]
-    async fn recv(&mut self) -> std::result::Result<(), RecvError> {
+    async fn recv(&mut self) -> Result<()> {
         let socket_future = self.rx.recv();
         let bytes = match self.connection.timeout() {
             Some(duration) => match timeout(duration, socket_future).await {
@@ -177,7 +177,7 @@ impl Client {
             Some(bytes) => bytes,
             None => {
                 error!("client input channel dropped before client could safely terminate");
-                return Err(RecvError::DroppedChannel);
+                return Err(ChannelDroppedError.into());
             }
         };
         trace!(len = bytes.len(), "client received bytes");
@@ -195,10 +195,6 @@ impl Client {
     }
 }
 
-#[derive(Error, Debug)]
-enum RecvError {
-    #[error("client's receiver channel has been dropped")]
-    DroppedChannel,
-    #[error(transparent)]
-    QuicError(#[from] quiche::Error),
-}
+#[derive(Debug, Error)]
+#[error("client input channel was dropped before the client could safely terminate")]
+struct ChannelDroppedError;
