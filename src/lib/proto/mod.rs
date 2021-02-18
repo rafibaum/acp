@@ -3,11 +3,12 @@
 #[allow(missing_docs)]
 mod packets;
 
-use crate::AcpError;
 use bytes::{Buf, BytesMut};
 use packet::Data;
 pub use packets::*;
 use prost::Message;
+use std::error::Error;
+use std::fmt::{Display, Formatter};
 use std::net::IpAddr;
 
 impl Packet {
@@ -38,13 +39,13 @@ impl From<IpAddr> for IpAddress {
     }
 }
 
-pub fn frame(buf: &mut BytesMut) -> Result<Option<Packet>, AcpError> {
+pub fn frame(buf: &mut BytesMut) -> Result<Option<Packet>, AcpFrameError> {
     let mut tmp_buf = &buf[..];
     let len = match prost::decode_length_delimiter(tmp_buf) {
         Ok(len) => len,
         Err(e) => {
             if tmp_buf.len() > 10 {
-                return Err(AcpError::MalformedLengthDelimiter(e));
+                return Err(AcpFrameError::MalformedLengthDelimiter(e));
             } else {
                 return Ok(None);
             }
@@ -57,7 +58,36 @@ pub fn frame(buf: &mut BytesMut) -> Result<Option<Packet>, AcpError> {
         return Ok(None);
     }
 
-    let packet = Packet::decode(&tmp_buf[..len]).map_err(|e| AcpError::MalformedPacket(e))?;
+    let packet = Packet::decode(&tmp_buf[..len]).map_err(|e| AcpFrameError::MalformedPacket(e))?;
     buf.advance(len_delim_len + len);
     Ok(Some(packet))
+}
+
+#[derive(Debug)]
+pub enum AcpFrameError {
+    MalformedLengthDelimiter(prost::DecodeError),
+    MalformedPacket(prost::DecodeError),
+}
+
+impl Error for AcpFrameError {
+    fn source(&self) -> Option<&(dyn Error + 'static)> {
+        match self {
+            AcpFrameError::MalformedLengthDelimiter(err) => Some(err),
+            AcpFrameError::MalformedPacket(err) => Some(err),
+        }
+    }
+}
+
+impl Display for AcpFrameError {
+    fn fmt(&self, f: &mut Formatter<'_>) -> std::fmt::Result {
+        match self {
+            AcpFrameError::MalformedLengthDelimiter(_) => write!(
+                f,
+                "encountered a malformed length delimiter while framing a packet"
+            ),
+            AcpFrameError::MalformedPacket(_) => {
+                write!(f, "encountered a malformed packet during framing")
+            }
+        }
+    }
 }

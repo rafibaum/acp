@@ -8,12 +8,13 @@ mod client;
 pub mod router;
 
 use crate::router::Router;
+use anyhow::{Context, Result};
 use thiserror::Error;
 use tracing_subscriber;
 
 /// Server's main function. Starts the router and manages top-level error handling.
 #[tokio::main]
-async fn main() -> anyhow::Result<()> {
+async fn main() -> Result<()> {
     tracing_subscriber::fmt::init();
 
     let mut config = quiche::Config::new(quiche::PROTOCOL_VERSION).unwrap();
@@ -40,19 +41,4 @@ async fn main() -> anyhow::Result<()> {
 pub enum AcpServerError {
     #[error("client input channel was dropped before the client could safely terminate")]
     ChannelDropped,
-    #[error("{0}")]
-    QuicError(&'static str, #[source] quiche::Error),
-}
-
-trait Context<T> {
-    fn context(self, context: &'static str) -> Result<T, AcpServerError>;
-}
-
-impl<T> Context<T> for quiche::Result<T> {
-    fn context(self, context: &'static str) -> Result<T, AcpServerError> {
-        match self {
-            Ok(val) => Ok(val),
-            Err(e) => Err(AcpServerError::QuicError(context, e)),
-        }
-    }
 }
