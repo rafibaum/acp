@@ -82,7 +82,7 @@ impl Client {
         let mut len = buf.len();
         buf.resize(len + QUEUE_BUMP_SIZE, 0);
 
-        while let Ok((read, fin)) = self.connection.stream_recv(stream_id, &mut buf[len..]) {
+        while let Ok((read, _fin)) = self.connection.stream_recv(stream_id, &mut buf[len..]) {
             //TODO: Handle fin
             len += read;
             buf.resize(len + QUEUE_BUMP_SIZE, 0);

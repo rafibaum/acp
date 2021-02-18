@@ -69,7 +69,8 @@ async fn main() -> Result<()> {
                 let mut len = buf.len();
                 buf.resize(len + QUEUE_BUMP_SIZE, 0);
 
-                while let Ok((read, fin)) = conn.stream_recv(stream_id, &mut buf[len..]) {
+                // TODO: Handle fin
+                while let Ok((read, _fin)) = conn.stream_recv(stream_id, &mut buf[len..]) {
                     len += read;
                     buf.resize(len + QUEUE_BUMP_SIZE, 0);
                 }

@@ -39,6 +39,8 @@ impl From<IpAddr> for IpAddress {
     }
 }
 
+/// Attempts to take a stream of bytes and frame it as a packet. If successful, the buffer is
+/// advanced past the bytes used for the packet.
 pub fn frame(buf: &mut BytesMut) -> Result<Option<Packet>, AcpFrameError> {
     let mut tmp_buf = &buf[..];
     let len = match prost::decode_length_delimiter(tmp_buf) {
@@ -63,9 +65,13 @@ pub fn frame(buf: &mut BytesMut) -> Result<Option<Packet>, AcpFrameError> {
     Ok(Some(packet))
 }
 
+/// Errors which can be returned when framing a packet.
 #[derive(Debug)]
 pub enum AcpFrameError {
+    /// The length delimiter of a packet could not be decoded
     MalformedLengthDelimiter(prost::DecodeError),
+    /// The packet could not be decoded (although a length delimiter was decoded, but may not be
+    /// correct).
     MalformedPacket(prost::DecodeError),
 }
 

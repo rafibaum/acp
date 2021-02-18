@@ -5,7 +5,7 @@
 #![warn(missing_docs)]
 
 mod client;
-pub mod router;
+mod router;
 
 use crate::router::Router;
 use anyhow::{Context, Result};
@@ -37,9 +37,11 @@ async fn main() -> Result<()> {
     router.run().await
 }
 
+/// Error enum containing the errors generated in the ACP server.
 //TODO: Remove thiserror
 #[derive(Debug, Error)]
 pub enum AcpServerError {
+    /// When an async channel is illegally dropped without properly terminating
     #[error("client input channel was dropped before the client could safely terminate")]
     ChannelDropped,
 }

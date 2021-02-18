@@ -7,8 +7,10 @@ use std::fmt::{Display, Formatter};
 
 pub mod proto;
 
+/// ACP errors which are relevant in both the client and server.
 #[derive(Debug)]
 pub enum AcpError {
+    /// When a packet does not conform to the structure it was expected to.
     InvalidPacket,
 }
 
