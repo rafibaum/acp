@@ -9,10 +9,13 @@ pub mod router;
 
 use crate::router::Router;
 use anyhow::{Context, Result};
+use tracing_subscriber;
 
 /// Server's main function. Starts the router and manages top-level error handling.
 #[tokio::main]
 async fn main() -> Result<()> {
+    tracing_subscriber::fmt::init();
+
     let mut config = quiche::Config::new(quiche::PROTOCOL_VERSION).unwrap();
     config.set_application_protos(b"\x07acp/0.1").unwrap();
     config

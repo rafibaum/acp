@@ -24,6 +24,8 @@ quiche = "0.7.0"
 ring = { version = "0.16.20", features = ["std"] }
 thiserror = "1.0.23"
 tokio = { version = "1.1.1", features = ["full"] }
+tracing = "0.1.23"
+tracing-subscriber = "0.2.15"
 
 [build-dependencies]
 prost-build = "0.7.0"

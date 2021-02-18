@@ -8,6 +8,7 @@ use std::net::SocketAddr;
 use std::sync::Arc;
 use tokio::net::{ToSocketAddrs, UdpSocket};
 use tokio::sync::mpsc::{unbounded_channel, UnboundedSender};
+use tracing::{debug, info, trace, trace_span, Instrument};
 
 pub const DATAGRAM_SIZE: usize = u16::MAX as usize;
 
@@ -43,22 +44,30 @@ impl Router {
         })
     }
 
+    #[tracing::instrument(level = "trace", skip(self))]
     pub async fn run(mut self) -> Result<()> {
         loop {
             self.poll_socket().await?
         }
     }
 
+    #[tracing::instrument(level = "trace", skip(self))]
     async fn poll_socket(&mut self) -> Result<()> {
         let (len, addr) = self
             .socket
             .recv_from(&mut self.recv_buf)
             .await
             .context("Failure while listening to server socket")?;
+
+        trace!(%addr, len, "received datagram");
+
         let header =
             match quiche::Header::from_slice(&mut self.recv_buf[..len], quiche::MAX_CONN_ID_LEN) {
                 Ok(header) => header,
-                Err(_) => return Ok(()),
+                Err(_) => {
+                    debug!("received packet without QUIC header");
+                    return Ok(());
+                }
             };
 
         let mut buf = BytesMut::new();
@@ -69,7 +78,10 @@ impl Router {
         if let Err(_e) = match self.handles.get(&header.dcid) {
             Some(handle) => {
                 match handle.tx.send(buf) {
-                    Ok(()) => Ok(()),
+                    Ok(()) => {
+                        trace!(size = len, "datagram passed to client handle");
+                        Ok(())
+                    }
                     Err(e) => {
                         // Client dropped, run a handshake instead
                         self.handshake(addr, &header, e.0)
@@ -88,6 +100,9 @@ impl Router {
         header: &quiche::Header,
         buf: BytesMut,
     ) -> Result<()> {
+        let span = trace_span!("handshake", ty = ?header.ty, version = header.version, scid = ?header.scid.as_ref());
+        let _enter = span.enter();
+
         if header.ty != quiche::Type::Initial {
             return Ok(());
         }
@@ -107,9 +122,16 @@ impl Router {
         let client = Client::new(self.socket.clone(), addr, connection, rx);
 
         tokio::spawn(async move {
-            if let Err(e) = client.run().await {
-                eprintln!("Client error: {}", e);
+            let span = trace_span!("client");
+            async move {
+                info!("starting client");
+                if let Err(e) = client.run().await {
+                    eprintln!("Client error: {}", e);
+                }
+                info!("terminating client");
             }
+            .instrument(span)
+            .await
         });
 
         Ok(())

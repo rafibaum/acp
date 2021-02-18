@@ -13,6 +13,7 @@ use thiserror::Error;
 use tokio::net::UdpSocket;
 use tokio::sync::mpsc::UnboundedReceiver;
 use tokio::time::timeout;
+use tracing::{debug, error, trace, trace_span, Instrument};
 
 pub struct Client {
     socket: Arc<UdpSocket>,
@@ -50,6 +51,7 @@ impl Client {
             self.send().await?; // Respond as necessary
 
             if self.connection.is_closed() {
+                debug!("client connection closed");
                 break;
             }
 
@@ -61,38 +63,46 @@ impl Client {
         Ok(())
     }
 
+    #[tracing::instrument(level = "trace", skip(self))]
     async fn read_streams(&mut self) -> Result<()> {
-        const QUEUE_BUMP_SIZE: usize = 1024;
-
-        println!("Reading streams");
         for stream_id in self.connection.readable() {
-            println!("Receiving data for stream: {}", stream_id);
-            let mut buf = self
-                .stream_bufs
-                .remove(&stream_id)
-                .unwrap_or_else(|| BytesMut::new());
-            let mut len = buf.len();
-            buf.resize(len + QUEUE_BUMP_SIZE, 0);
-
-            while let Ok((read, fin)) = self.connection.stream_recv(stream_id, &mut buf[len..]) {
-                //TODO: Handle fin
-                len += read;
-                buf.resize(len + QUEUE_BUMP_SIZE, 0);
-            }
-
-            buf.resize(len, 0);
-
-            while let Some(packet) = proto::frame(&mut buf).unwrap() {
-                // TODO: Handle
-                self.process(stream_id, packet).await?;
-            }
-
-            self.stream_bufs.insert(stream_id, buf);
+            self.read_stream(stream_id).await?;
         }
 
         Ok(())
     }
 
+    #[tracing::instrument(level = "trace", skip(self))]
+    async fn read_stream(&mut self, stream_id: u64) -> Result<()> {
+        const QUEUE_BUMP_SIZE: usize = 1024;
+
+        let mut buf = self
+            .stream_bufs
+            .remove(&stream_id)
+            .unwrap_or_else(|| BytesMut::new());
+        let mut len = buf.len();
+        buf.resize(len + QUEUE_BUMP_SIZE, 0);
+
+        while let Ok((read, fin)) = self.connection.stream_recv(stream_id, &mut buf[len..]) {
+            //TODO: Handle fin
+            len += read;
+            buf.resize(len + QUEUE_BUMP_SIZE, 0);
+        }
+
+        buf.resize(len, 0);
+        trace!(len, "read new data from QUIC stream");
+
+        while let Some(packet) = proto::frame(&mut buf).unwrap() {
+            // TODO: Handle
+            self.process(stream_id, packet).await?;
+        }
+
+        self.stream_bufs.insert(stream_id, buf);
+
+        Ok(())
+    }
+
+    #[tracing::instrument(level = "trace", skip(self, stream_id, packet))]
     async fn process(&mut self, stream_id: u64, packet: Packet) -> Result<()> {
         match packet.data.unwrap() {
             //TODO: Handle
@@ -110,6 +120,7 @@ impl Client {
         Ok(())
     }
 
+    #[tracing::instrument(level = "trace", skip(self, stream_id, packet))]
     async fn send_packet(&mut self, stream_id: u64, packet: Packet) -> Result<()> {
         let mut buf = BytesMut::new();
         packet.encode_length_delimited(&mut buf)?;
@@ -117,9 +128,11 @@ impl Client {
             buf.advance(self.connection.stream_send(stream_id, &buf[..], false)?);
         }
 
+        trace!("packet fully buffered in stream");
         self.send().await
     }
 
+    #[tracing::instrument(level = "trace", skip(self))]
     async fn send(&mut self) -> Result<()> {
         loop {
             let len = match self.connection.send(&mut self.send_buf) {
@@ -127,7 +140,10 @@ impl Client {
                 Err(quiche::Error::Done) => {
                     return Ok(());
                 }
-                Err(e) => return Err(e.into()),
+                Err(e) => {
+                    error!(err = %e, "QUIC error while processing outgoing bytes");
+                    return Err(e.into());
+                }
             };
 
             let mut sent = 0;
@@ -136,17 +152,20 @@ impl Client {
                     .socket
                     .send_to(&self.send_buf[sent..len], self.addr)
                     .await?;
+                trace!(written, "sent datagram to client");
                 sent += written;
             }
         }
     }
 
+    #[tracing::instrument(level = "trace", skip(self))]
     async fn recv(&mut self) -> std::result::Result<(), RecvError> {
         let socket_future = self.rx.recv();
         let bytes = match self.connection.timeout() {
             Some(duration) => match timeout(duration, socket_future).await {
                 Ok(bytes) => bytes,
                 Err(_) => {
+                    trace!("timeout lapsed");
                     self.connection.on_timeout();
                     return Ok(());
                 }
@@ -156,15 +175,22 @@ impl Client {
 
         let mut bytes = match bytes {
             Some(bytes) => bytes,
-            None => return Err(RecvError::DroppedChannel),
+            None => {
+                error!("client input channel dropped before client could safely terminate");
+                return Err(RecvError::DroppedChannel);
+            }
         };
+        trace!(len = bytes.len(), "client received bytes");
 
         match self.connection.recv(&mut bytes) {
             Ok(len) => {
-                println!("Client: QUIC read {} out of {}", len, bytes.len());
+                trace!(read = len, total = bytes.len(), "QUIC accepted input bytes");
                 Ok(())
             }
-            Err(e) => Err(e.into()),
+            Err(e) => {
+                error!(err = %e, "QUIC error while processing incoming bytes");
+                Err(e.into())
+            }
         }
     }
 }
