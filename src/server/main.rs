@@ -9,6 +9,7 @@ pub mod router;
 
 use crate::router::Router;
 use anyhow::{Context, Result};
+use thiserror::Error;
 use tracing_subscriber;
 
 /// Server's main function. Starts the router and manages top-level error handling.
@@ -34,4 +35,10 @@ async fn main() -> Result<()> {
     config.set_initial_max_stream_data_uni(1000000);
     let router = Router::new("127.0.0.1:55280", config).await?;
     router.run().await
+}
+
+#[derive(Debug, Error)]
+pub enum AcpServerError {
+    #[error("client input channel was dropped before the client could safely terminate")]
+    ChannelDropped,
 }

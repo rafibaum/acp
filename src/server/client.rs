@@ -1,4 +1,4 @@
-use crate::router;
+use crate::{router, AcpServerError};
 use anyhow::Result;
 use bytes::{Buf, BytesMut};
 use libacp::proto;
@@ -9,11 +9,10 @@ use std::collections::HashMap;
 use std::net::SocketAddr;
 use std::pin::Pin;
 use std::sync::Arc;
-use thiserror::Error;
 use tokio::net::UdpSocket;
 use tokio::sync::mpsc::UnboundedReceiver;
 use tokio::time::timeout;
-use tracing::{debug, error, trace, trace_span, Instrument};
+use tracing::{debug, error, trace};
 
 pub struct Client {
     socket: Arc<UdpSocket>,
@@ -92,8 +91,16 @@ impl Client {
         buf.resize(len, 0);
         trace!(len, "read new data from QUIC stream");
 
-        while let Some(packet) = proto::frame(&mut buf).unwrap() {
-            // TODO: Handle
+        loop {
+            let packet = match proto::frame(&mut buf) {
+                Ok(Some(packet)) => packet,
+                Ok(None) => break,
+                Err(e) => {
+                    error!(err = %e, "could not frame packet in stream");
+                    return Err(e.into());
+                }
+            };
+
             self.process(stream_id, packet).await?;
         }
 
@@ -104,8 +111,15 @@ impl Client {
 
     #[tracing::instrument(level = "trace", skip(self, stream_id, packet))]
     async fn process(&mut self, stream_id: u64, packet: Packet) -> Result<()> {
-        match packet.data.unwrap() {
-            //TODO: Handle
+        let data = match packet.data {
+            Some(data) => data,
+            None => {
+                error!("packet sent without data field");
+                return Err(AcpServerError::ChannelDropped.into());
+            }
+        };
+
+        match data {
             Data::Ping(ping) => {
                 let response = Packet::new(Data::Ping(Ping { data: ping.data }));
                 println!("Sending ping response");
@@ -177,7 +191,7 @@ impl Client {
             Some(bytes) => bytes,
             None => {
                 error!("client input channel dropped before client could safely terminate");
-                return Err(ChannelDroppedError.into());
+                return Err(AcpServerError::ChannelDropped.into());
             }
         };
         trace!(len = bytes.len(), "client received bytes");
@@ -194,7 +208,3 @@ impl Client {
         }
     }
 }
-
-#[derive(Debug, Error)]
-#[error("client input channel was dropped before the client could safely terminate")]
-struct ChannelDroppedError;

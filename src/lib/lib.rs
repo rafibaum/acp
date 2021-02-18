@@ -20,6 +20,10 @@ pub enum AcpError {
     /// Represents an error occurring during the protocol buffers decoding step.
     #[error("packet decode error")]
     PacketDecodeError(#[from] prost::DecodeError),
+    #[error("encountered a malformed length delimiter while framing a packet")]
+    MalformedLengthDelimiter(prost::DecodeError),
+    #[error("encountered a malformed packet during framing")]
+    MalformedPacket(prost::DecodeError),
 }
 
 impl<T> From<PoisonError<T>> for AcpError {

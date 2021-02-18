@@ -3,13 +3,12 @@
 #[allow(missing_docs)]
 mod packets;
 
-use crate::proto::PacketFrameError::{MalformedLengthDelimiter, MalformedPacket};
+use crate::AcpError;
 use bytes::{Buf, BytesMut};
 use packet::Data;
 pub use packets::*;
 use prost::Message;
 use std::net::IpAddr;
-use thiserror::Error;
 
 impl Packet {
     /// Create a new packet of the specified type.
@@ -39,13 +38,13 @@ impl From<IpAddr> for IpAddress {
     }
 }
 
-pub fn frame(buf: &mut BytesMut) -> Result<Option<Packet>, PacketFrameError> {
+pub fn frame(buf: &mut BytesMut) -> Result<Option<Packet>, AcpError> {
     let mut tmp_buf = &buf[..];
     let len = match prost::decode_length_delimiter(tmp_buf) {
         Ok(len) => len,
         Err(e) => {
             if tmp_buf.len() > 10 {
-                return Err(MalformedLengthDelimiter(e));
+                return Err(AcpError::MalformedLengthDelimiter(e));
             } else {
                 return Ok(None);
             }
@@ -58,15 +57,7 @@ pub fn frame(buf: &mut BytesMut) -> Result<Option<Packet>, PacketFrameError> {
         return Ok(None);
     }
 
-    let packet = Packet::decode(&tmp_buf[..len]).map_err(|e| MalformedPacket(e))?;
+    let packet = Packet::decode(&tmp_buf[..len]).map_err(|e| AcpError::MalformedPacket(e))?;
     buf.advance(len_delim_len + len);
     Ok(Some(packet))
-}
-
-#[derive(Error, Debug)]
-pub enum PacketFrameError {
-    #[error("encountered a malformed length delimiter while framing a packet")]
-    MalformedLengthDelimiter(prost::DecodeError),
-    #[error("encountered a malformed packet during framing")]
-    MalformedPacket(prost::DecodeError),
 }
