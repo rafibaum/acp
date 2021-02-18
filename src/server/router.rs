@@ -8,7 +8,7 @@ use std::net::SocketAddr;
 use std::sync::Arc;
 use tokio::net::{ToSocketAddrs, UdpSocket};
 use tokio::sync::mpsc::{unbounded_channel, UnboundedSender};
-use tracing::{debug, info, trace, trace_span, Instrument};
+use tracing::{debug, error, info, trace, trace_span, Instrument};
 
 pub const DATAGRAM_SIZE: usize = u16::MAX as usize;
 
@@ -75,7 +75,7 @@ impl Router {
         std::mem::swap(&mut self.recv_buf, &mut buf);
         buf.resize(len, 0);
 
-        if let Err(_e) = match self.handles.get(&header.dcid) {
+        if let Err(err) = match self.handles.get(&header.dcid) {
             Some(handle) => {
                 match handle.tx.send(buf) {
                     Ok(()) => {
@@ -89,7 +89,9 @@ impl Router {
                 }
             }
             None => self.handshake(addr, &header, buf),
-        } {}
+        } {
+            error!(?err, "handshake failed");
+        }
 
         Ok(())
     }
@@ -104,6 +106,7 @@ impl Router {
         let _enter = span.enter();
 
         if header.ty != quiche::Type::Initial {
+            debug!("received non-initial packet for handshake");
             return Ok(());
         }
 

@@ -1,9 +1,9 @@
 use crate::{router, AcpServerError};
-use anyhow::Result;
+use anyhow::{Context, Result};
 use bytes::{Buf, BytesMut};
-use libacp::proto;
 use libacp::proto::packet::Data;
 use libacp::proto::{Packet, Ping};
+use libacp::{proto, AcpError};
 use prost::Message;
 use std::collections::HashMap;
 use std::net::SocketAddr;
@@ -115,7 +115,7 @@ impl Client {
             Some(data) => data,
             None => {
                 error!("packet sent without data field");
-                return Err(AcpServerError::ChannelDropped.into());
+                return Err(AcpError::InvalidPacket).context("missing data field");
             }
         };
 
@@ -156,7 +156,7 @@ impl Client {
                 }
                 Err(e) => {
                     error!(err = %e, "QUIC error while processing outgoing bytes");
-                    return Err(e.into());
+                    return Err(e).context("QUIC error while processing outgoing bytes");
                 }
             };
 
@@ -191,7 +191,8 @@ impl Client {
             Some(bytes) => bytes,
             None => {
                 error!("client input channel dropped before client could safely terminate");
-                return Err(AcpServerError::ChannelDropped.into());
+                return Err(AcpServerError::ChannelDropped)
+                    .context("client input channel dropped before client could safely terminate");
             }
         };
         trace!(len = bytes.len(), "client received bytes");
@@ -203,7 +204,7 @@ impl Client {
             }
             Err(e) => {
                 error!(err = %e, "QUIC error while processing incoming bytes");
-                Err(e.into())
+                Err(e).context("QUIC error while processing incoming bytes")
             }
         }
     }

@@ -37,6 +37,7 @@ async fn main() -> Result<()> {
     router.run().await
 }
 
+//TODO: Remove thiserror
 #[derive(Debug, Error)]
 pub enum AcpServerError {
     #[error("client input channel was dropped before the client could safely terminate")]
