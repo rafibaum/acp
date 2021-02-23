@@ -1,6 +1,6 @@
 #[derive(Clone, PartialEq, ::prost::Message)]
 pub struct Packet {
-    #[prost(oneof = "packet::Data", tags = "1")]
+    #[prost(oneof = "packet::Data", tags = "1, 2, 3")]
     pub data: ::core::option::Option<packet::Data>,
 }
 /// Nested message and enum types in `Packet`.
@@ -9,12 +9,38 @@ pub mod packet {
     pub enum Data {
         #[prost(message, tag = "1")]
         Ping(super::Ping),
+        #[prost(message, tag = "2")]
+        StartBenchmark(super::StartBenchmark),
+        #[prost(message, tag = "3")]
+        StopBenchmark(super::StopBenchmark),
+    }
+}
+#[derive(Clone, PartialEq, ::prost::Message)]
+pub struct Datagram {
+    #[prost(oneof = "datagram::Data", tags = "1")]
+    pub data: ::core::option::Option<datagram::Data>,
+}
+/// Nested message and enum types in `Datagram`.
+pub mod datagram {
+    #[derive(Clone, PartialEq, ::prost::Oneof)]
+    pub enum Data {
+        #[prost(message, tag = "1")]
+        BenchmarkPayload(super::BenchmarkPayload),
     }
 }
 #[derive(Clone, PartialEq, ::prost::Message)]
 pub struct Ping {
     #[prost(string, tag = "1")]
     pub data: ::prost::alloc::string::String,
+}
+#[derive(Clone, PartialEq, ::prost::Message)]
+pub struct StartBenchmark {}
+#[derive(Clone, PartialEq, ::prost::Message)]
+pub struct StopBenchmark {}
+#[derive(Clone, PartialEq, ::prost::Message)]
+pub struct BenchmarkPayload {
+    #[prost(bytes = "vec", tag = "1")]
+    pub payload: ::prost::alloc::vec::Vec<u8>,
 }
 #[derive(Clone, PartialEq, ::prost::Message)]
 pub struct ValidationToken {

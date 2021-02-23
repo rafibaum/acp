@@ -85,6 +85,7 @@ async fn main() -> Result<()> {
                             conn.close(true, 0, b"DONE")?;
                             send(&mut conn, &sock).await?;
                         }
+                        _ => panic!("Unexpected packet"),
                     }
                 }
             }

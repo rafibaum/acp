@@ -5,11 +5,31 @@ package packets;
 message Packet {
   oneof data {
     Ping ping = 1;
+    StartBenchmark startBenchmark = 2;
+    StopBenchmark stopBenchmark = 3;
+  }
+}
+
+message Datagram {
+  oneof data {
+    BenchmarkPayload benchmarkPayload = 1;
   }
 }
 
 message Ping {
   string data = 1;
+}
+
+message StartBenchmark {
+
+}
+
+message StopBenchmark {
+
+}
+
+message BenchmarkPayload {
+  bytes payload = 1;
 }
 
 message ValidationToken {

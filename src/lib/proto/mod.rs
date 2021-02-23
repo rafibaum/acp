@@ -46,10 +46,10 @@ pub fn frame(buf: &mut BytesMut) -> Result<Option<Packet>, AcpFrameError> {
     let len = match prost::decode_length_delimiter(tmp_buf) {
         Ok(len) => len,
         Err(e) => {
-            if tmp_buf.len() > 10 {
-                return Err(AcpFrameError::MalformedLengthDelimiter(e));
+            return if tmp_buf.len() > 10 {
+                Err(AcpFrameError::MalformedLengthDelimiter(e))
             } else {
-                return Ok(None);
+                Ok(None)
             }
         }
     };
