@@ -5,12 +5,13 @@ use libacp::proto::packet::Data;
 use libacp::proto::{Packet, Ping};
 use libacp::{proto, AcpError};
 use prost::Message;
+use quiche::ConnectionId;
 use std::collections::HashMap;
 use std::net::SocketAddr;
 use std::pin::Pin;
 use std::sync::Arc;
 use tokio::net::UdpSocket;
-use tokio::sync::mpsc::UnboundedReceiver;
+use tokio::sync::mpsc::{UnboundedReceiver, UnboundedSender};
 use tokio::time::timeout;
 use tracing::{debug, error, trace};
 
@@ -19,6 +20,8 @@ pub struct Client {
     addr: SocketAddr,
     connection: Pin<Box<quiche::Connection>>,
     rx: UnboundedReceiver<BytesMut>,
+    scid: ConnectionId<'static>,
+    term_tx: UnboundedSender<ConnectionId<'static>>,
     send_buf: BytesMut,
     stream_bufs: HashMap<u64, BytesMut>,
 }
@@ -29,6 +32,8 @@ impl Client {
         addr: SocketAddr,
         connection: Pin<Box<quiche::Connection>>,
         rx: UnboundedReceiver<BytesMut>,
+        scid: ConnectionId<'static>,
+        term_tx: UnboundedSender<ConnectionId<'static>>,
     ) -> Self {
         let mut send_buf = BytesMut::with_capacity(router::DATAGRAM_SIZE);
         send_buf.resize(router::DATAGRAM_SIZE, 0);
@@ -39,6 +44,8 @@ impl Client {
             connection,
             send_buf,
             rx,
+            scid,
+            term_tx,
             stream_bufs: HashMap::new(),
         }
     }
@@ -57,6 +64,11 @@ impl Client {
             if self.connection.is_established() && !self.connection.is_draining() {
                 self.read_streams().await?;
             }
+        }
+
+        if let Err(e) = self.term_tx.send(self.scid) {
+            error!("client termination channel dropped");
+            return Err(e).context("client termination channel dropped");
         }
 
         Ok(())
