@@ -1,8 +1,8 @@
 use crate::{router, AcpServerError};
 use anyhow::{Context, Result};
 use bytes::{Buf, BytesMut};
-use libacp::proto::packet::Data;
-use libacp::proto::{Packet, Ping};
+use libacp::proto::{datagram, packet, StartBenchmark};
+use libacp::proto::{Datagram, Packet, Ping};
 use libacp::{proto, AcpError};
 use prost::Message;
 use quiche::ConnectionId;
@@ -23,7 +23,9 @@ pub struct Client {
     scid: ConnectionId<'static>,
     term_tx: UnboundedSender<ConnectionId<'static>>,
     send_buf: BytesMut,
+    dgram_buf: BytesMut,
     stream_bufs: HashMap<u64, BytesMut>,
+    state: ClientState,
 }
 
 impl Client {
@@ -38,15 +40,20 @@ impl Client {
         let mut send_buf = BytesMut::with_capacity(router::DATAGRAM_SIZE);
         send_buf.resize(router::DATAGRAM_SIZE, 0);
 
+        let mut dgram_buf = BytesMut::with_capacity(router::DATAGRAM_SIZE);
+        dgram_buf.resize(router::DATAGRAM_SIZE, 0);
+
         Client {
             socket,
             addr,
             connection,
             send_buf,
+            dgram_buf,
             rx,
             scid,
             term_tx,
             stream_bufs: HashMap::new(),
+            state: ClientState::Connected,
         }
     }
 
@@ -57,12 +64,14 @@ impl Client {
             self.send().await?; // Respond as necessary
 
             if self.connection.is_closed() {
+                self.state = ClientState::Closed;
                 debug!("client connection closed");
                 break;
             }
 
             if self.connection.is_established() && !self.connection.is_draining() {
                 self.read_streams().await?;
+                self.read_dgrams().await?;
             }
         }
 
@@ -121,6 +130,18 @@ impl Client {
         Ok(())
     }
 
+    #[tracing::instrument(level = "trace", skip(self))]
+    async fn read_dgrams(&mut self) -> Result<()> {
+        while let Ok(len) = self.connection.dgram_recv(&mut self.dgram_buf) {
+            trace!(len, "received datagram");
+            let datagram =
+                Datagram::decode(&self.dgram_buf[..len]).context("unable to frame datagram")?;
+            self.process_dgram(datagram).await?;
+        }
+
+        Ok(())
+    }
+
     #[tracing::instrument(level = "trace", skip(self, stream_id, packet))]
     async fn process(&mut self, stream_id: u64, packet: Packet) -> Result<()> {
         let data = match packet.data {
@@ -132,12 +153,75 @@ impl Client {
         };
 
         match data {
-            Data::Ping(ping) => {
-                let response = Packet::new(Data::Ping(Ping { data: ping.data }));
-                println!("Sending ping response");
-                self.send_packet(stream_id, response).await
+            packet::Data::Ping(ping) => {
+                trace!(data = %&ping.data, "sending ping response");
+                let response = Packet::new(packet::Data::Ping(Ping { data: ping.data }));
+                self.send_packet(stream_id, response).await?;
+            }
+
+            packet::Data::StartBenchmark(_) => match &self.state {
+                ClientState::Connected => {
+                    self.state = ClientState::Benchmarking(0);
+                    trace!("starting benchmark");
+                    let response = Packet::new(packet::Data::StartBenchmark(StartBenchmark {}));
+                    self.send_packet(stream_id, response).await?;
+                }
+                other => {
+                    error!(state = ?other, "received a start benchmarking packet unexpectedly");
+                    return Err(AcpError::IllegalPacket)
+                        .context("unexpected start benchmarking packet");
+                }
+            },
+
+            packet::Data::StopBenchmark(_) => match &self.state {
+                ClientState::Benchmarking(data) => {
+                    trace!(data, "stopping benchmark");
+                    println!("Benchmark stopped after: {}", data);
+                    self.state = ClientState::Connected;
+                }
+                other => {
+                    error!(state = ?other, "received a stop benchmarking packet unexpectedly");
+                    return Err(AcpError::IllegalPacket)
+                        .context("unexpected stop benchmarking packet");
+                }
+            },
+        }
+
+        Ok(())
+    }
+
+    #[tracing::instrument(level = "trace", skip(self, datagram))]
+    async fn process_dgram(&mut self, datagram: Datagram) -> Result<()> {
+        let data = match datagram.data {
+            Some(data) => data,
+            None => {
+                error!("datagram sent without data field");
+                return Err(AcpError::InvalidPacket).context("datagram missing data field");
+            }
+        };
+
+        match data {
+            datagram::Data::BenchmarkPayload(payload) => {
+                let payload = payload.payload;
+                match &mut self.state {
+                    ClientState::Benchmarking(data) => {
+                        *data += payload.len() as u64;
+                        trace!(
+                            cumulative = *data,
+                            payload = payload.len(),
+                            "received benchmark payload"
+                        );
+                    }
+                    _ => {
+                        error!("received benchmark payload in illegal state");
+                        return Err(AcpError::IllegalPacket)
+                            .context("received benchmark payload in illegal state");
+                    }
+                }
             }
         }
+
+        Ok(())
     }
 
     async fn close(&mut self, app: bool, err: u64, reason: &[u8]) -> Result<()> {
@@ -178,7 +262,7 @@ impl Client {
                     .socket
                     .send_to(&self.send_buf[sent..len], self.addr)
                     .await?;
-                trace!(written, "sent datagram to client");
+                trace!(written, length = len, "sent datagram to client");
                 sent += written;
             }
         }
@@ -220,4 +304,11 @@ impl Client {
             }
         }
     }
+}
+
+#[derive(Debug)]
+enum ClientState {
+    Connected,
+    Closed,
+    Benchmarking(u64),
 }

@@ -7,11 +7,12 @@
 use anyhow::Result;
 use bytes::{Buf, BytesMut};
 use libacp::proto;
-use libacp::proto::packet::Data;
-use libacp::proto::{Packet, Ping};
+use libacp::proto::{datagram, packet, BenchmarkPayload, StopBenchmark};
+use libacp::proto::{Datagram, Packet, Ping, StartBenchmark};
 use prost::Message;
 use quiche::ConnectionId;
 use ring::rand::SecureRandom;
+use std::time::Instant;
 use tokio::net::UdpSocket;
 use tokio::time::timeout;
 
@@ -32,6 +33,8 @@ async fn main() -> Result<()> {
     config.set_initial_max_stream_data_bidi_local(1000000);
     config.set_initial_max_stream_data_bidi_remote(1000000);
     config.set_initial_max_stream_data_uni(1000000);
+    config.set_max_idle_timeout(30 * 1000);
+    config.enable_dgram(true, 100, 100);
 
     let rng = ring::rand::SystemRandom::new();
     let mut scid = vec![0; quiche::MAX_CONN_ID_LEN];
@@ -49,10 +52,20 @@ async fn main() -> Result<()> {
         }
     }
 
-    let packet = Packet::new(Data::Ping(Ping {
+    let packet = Packet::new(packet::Data::Ping(Ping {
         data: String::from("Rafi"),
     }));
     send_packet(&mut conn, &sock, 0, packet).await?;
+
+    let start_benchmark = Packet::new(packet::Data::StartBenchmark(StartBenchmark {}));
+    send_packet(&mut conn, &sock, 0, start_benchmark).await?;
+
+    let mut benchmark_enabled = None;
+    let packet = Datagram::new(datagram::Data::BenchmarkPayload(BenchmarkPayload {
+        payload: vec![0; 15000],
+    }));
+    let mut benchmark_payload = BytesMut::new();
+    packet.encode(&mut benchmark_payload)?;
 
     loop {
         recv(&mut conn, &sock).await?;
@@ -80,12 +93,36 @@ async fn main() -> Result<()> {
                 while let Some(packet) = proto::frame(&mut buf)? {
                     // TODO: Handle
                     match packet.data.unwrap() {
-                        Data::Ping(ping) => {
+                        packet::Data::Ping(ping) => {
                             println!("Got ping: {}", ping.data);
-                            conn.close(true, 0, b"DONE")?;
-                            send(&mut conn, &sock).await?;
+                        }
+                        packet::Data::StartBenchmark(_) => {
+                            println!("Starting benchmarking");
+                            benchmark_enabled = Some(Instant::now());
+                        }
+                        packet::Data::StopBenchmark(_) => {
+                            benchmark_enabled = None;
+                            conn.dgram_purge_outgoing(&|_: &[u8]| -> bool { true });
                         }
                     }
+                }
+            }
+
+            if let Some(epoch) = benchmark_enabled {
+                if Instant::now().duration_since(epoch).as_secs() >= 10 {
+                    benchmark_enabled = None;
+                    send_packet(
+                        &mut conn,
+                        &sock,
+                        0,
+                        Packet::new(packet::Data::StopBenchmark(StopBenchmark {})),
+                    )
+                    .await?;
+                } else {
+                    if let Err(e) = conn.dgram_send(&mut benchmark_payload) {
+                        panic!("Error during benchmarking: {:?}", e);
+                    }
+                    send(&mut conn, &sock).await?;
                 }
             }
         }

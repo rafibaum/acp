@@ -4,7 +4,6 @@
 mod packets;
 
 use bytes::{Buf, BytesMut};
-use packet::Data;
 pub use packets::*;
 use prost::Message;
 use std::error::Error;
@@ -15,8 +14,14 @@ impl Packet {
     /// Create a new packet of the specified type.
     /// Convenience constructor for the auto-generated packet types since they can get unwieldy
     /// otherwise.
-    pub fn new(data: Data) -> Self {
+    pub fn new(data: packet::Data) -> Self {
         Packet { data: Some(data) }
+    }
+}
+
+impl Datagram {
+    pub fn new(data: datagram::Data) -> Self {
+        Datagram { data: Some(data) }
     }
 }
 
@@ -46,11 +51,11 @@ pub fn frame(buf: &mut BytesMut) -> Result<Option<Packet>, AcpFrameError> {
     let len = match prost::decode_length_delimiter(tmp_buf) {
         Ok(len) => len,
         Err(e) => {
-            if tmp_buf.len() > 10 {
-                return Err(AcpFrameError::MalformedLengthDelimiter(e));
+            return if tmp_buf.len() > 10 {
+                Err(AcpFrameError::MalformedLengthDelimiter(e))
             } else {
-                return Ok(None);
-            }
+                Ok(None)
+            };
         }
     };
 

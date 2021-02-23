@@ -33,6 +33,9 @@ async fn main() -> Result<()> {
     config.set_initial_max_stream_data_bidi_local(1000000);
     config.set_initial_max_stream_data_bidi_remote(1000000);
     config.set_initial_max_stream_data_uni(1000000);
+    config.set_max_idle_timeout(30 * 1000);
+    config.enable_dgram(true, 100, 100);
+
     let router = Router::new("127.0.0.1:55280", config).await?;
     router.run().await
 }
