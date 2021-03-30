@@ -5,6 +5,8 @@
 use std::error::Error;
 use std::fmt::{Display, Formatter};
 
+pub mod incoming;
+pub mod outgoing;
 pub mod proto;
 
 /// ACP errors which are relevant in both the client and server.
@@ -14,6 +16,8 @@ pub enum AcpError {
     InvalidPacket,
     /// When a packet is received at a time it is not expected
     IllegalPacket,
+    /// When a timeout has lapsed
+    TimeoutLapsed,
 }
 
 impl Error for AcpError {}
@@ -23,6 +27,7 @@ impl Display for AcpError {
         match self {
             AcpError::InvalidPacket => write!(f, "received packet with invalid structure"),
             AcpError::IllegalPacket => write!(f, "received a packet unexpectedly"),
+            AcpError::TimeoutLapsed => write!(f, "timeout lapsed"),
         }
     }
 }

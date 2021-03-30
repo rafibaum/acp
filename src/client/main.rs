@@ -6,24 +6,26 @@
 
 use anyhow::Result;
 use bytes::{Buf, BytesMut};
+use libacp::outgoing::{Outgoing, OutgoingPacket};
 use libacp::proto;
-use libacp::proto::{datagram, packet, BenchmarkPayload, StopBenchmark};
-use libacp::proto::{Datagram, Packet, Ping, StartBenchmark};
+use libacp::proto::{datagram, packet, BenchmarkPayload, StartTransfer, StopBenchmark};
+use libacp::proto::{Datagram, Packet, Ping};
 use prost::Message;
 use quiche::ConnectionId;
 use ring::rand::SecureRandom;
 use std::time::Instant;
+use tokio::fs::File;
 use tokio::net::UdpSocket;
 use tokio::time::timeout;
 
 /// Client's main function.
 #[tokio::main]
 async fn main() -> Result<()> {
-    let sock = UdpSocket::bind("127.0.0.1:55281").await?;
-    sock.connect("127.0.0.1:55280").await?;
+    let sock = UdpSocket::bind("127.0.0.1:55281").await.unwrap();
+    sock.connect("127.0.0.1:55280").await.unwrap();
 
-    let mut config = quiche::Config::new(quiche::PROTOCOL_VERSION)?;
-    config.set_application_protos(b"\x07acp/0.1")?;
+    let mut config = quiche::Config::new(quiche::PROTOCOL_VERSION).unwrap();
+    config.set_application_protos(b"\x07acp/0.1").unwrap();
     config.verify_peer(false);
     config.set_max_recv_udp_payload_size(65535);
     config.set_max_send_udp_payload_size(65535);
@@ -34,19 +36,19 @@ async fn main() -> Result<()> {
     config.set_initial_max_stream_data_bidi_remote(1000000);
     config.set_initial_max_stream_data_uni(1000000);
     config.set_max_idle_timeout(30 * 1000);
-    config.enable_dgram(true, 100, 100);
+    config.enable_dgram(true, 512, 512);
 
     let rng = ring::rand::SystemRandom::new();
     let mut scid = vec![0; quiche::MAX_CONN_ID_LEN];
-    rng.fill(&mut scid)?;
+    rng.fill(&mut scid).unwrap();
     let scid = ConnectionId::from_vec(scid);
 
-    let mut conn = quiche::connect(None, &scid, &mut config)?;
-    send(&mut conn, &sock).await?;
+    let mut conn = quiche::connect(None, &scid, &mut config).unwrap();
+    send(&mut conn, &sock).await.unwrap();
 
     loop {
-        recv(&mut conn, &sock).await?;
-        send(&mut conn, &sock).await?;
+        recv(&mut conn, &sock).await.unwrap();
+        send(&mut conn, &sock).await.unwrap();
         if conn.is_established() {
             break;
         }
@@ -55,21 +57,42 @@ async fn main() -> Result<()> {
     let packet = Packet::new(packet::Data::Ping(Ping {
         data: String::from("Rafi"),
     }));
-    send_packet(&mut conn, &sock, 0, packet).await?;
+    send_packet(&mut conn, &sock, 0, packet).await.unwrap();
 
-    let start_benchmark = Packet::new(packet::Data::StartBenchmark(StartBenchmark {}));
-    send_packet(&mut conn, &sock, 0, start_benchmark).await?;
+    let file = File::open("input.tar.gz").await.unwrap();
+    let block_size = 4 * 1000 * 1000;
+    let blocks = (file.metadata().await.unwrap().len() / block_size) + 1;
+
+    let packet = Packet::new(packet::Data::StartTransfer(StartTransfer {
+        id: vec![72, 82],
+        filename: Vec::from("output.tar.gz"),
+        blocks: blocks as u32,
+        block_size: block_size as u32,
+        piece_size: 16000,
+    }));
+    send_packet(&mut conn, &sock, 0, packet).await.unwrap();
+    std::mem::drop(file);
 
     let mut benchmark_enabled = None;
     let packet = Datagram::new(datagram::Data::BenchmarkPayload(BenchmarkPayload {
         payload: vec![0; 15000],
     }));
     let mut benchmark_payload = BytesMut::new();
-    packet.encode(&mut benchmark_payload)?;
+    packet.encode(&mut benchmark_payload).unwrap();
+
+    let (tx, mut rx) = tokio::sync::mpsc::channel(16);
 
     loop {
-        recv(&mut conn, &sock).await?;
-        send(&mut conn, &sock).await?;
+        tokio::select! {
+            result = recv(&mut conn, &sock) => {
+                result.unwrap();
+            }
+
+            Some(outgoing) = rx.recv() => {
+                send_outgoing(&mut conn, &sock, outgoing).await.unwrap();
+            }
+        }
+        send(&mut conn, &sock).await.unwrap();
 
         if conn.is_closed() {
             break;
@@ -90,7 +113,7 @@ async fn main() -> Result<()> {
 
                 buf.resize(len, 0);
 
-                while let Some(packet) = proto::frame(&mut buf)? {
+                while let Some(packet) = proto::frame(&mut buf).unwrap() {
                     // TODO: Handle
                     match packet.data.unwrap() {
                         packet::Data::Ping(ping) => {
@@ -104,6 +127,17 @@ async fn main() -> Result<()> {
                             benchmark_enabled = None;
                             conn.dgram_purge_outgoing(&|_: &[u8]| -> bool { true });
                         }
+                        packet::Data::AcceptTransfer(accept) => {
+                            let file = File::open("input.tar.gz").await.unwrap();
+                            let outgoing =
+                                Outgoing::new(accept.id, file, 4 * 1000 * 1000, 16000, tx.clone());
+                            tokio::spawn(async move {
+                                outgoing.run().await;
+                            });
+                        }
+
+                        packet::Data::StartTransfer(_) => unimplemented!(),
+                        packet::Data::BlockInfo(_) => unimplemented!(),
                     }
                 }
             }
@@ -117,12 +151,13 @@ async fn main() -> Result<()> {
                         0,
                         Packet::new(packet::Data::StopBenchmark(StopBenchmark {})),
                     )
-                    .await?;
+                    .await
+                    .unwrap();
                 } else {
                     if let Err(e) = conn.dgram_send(&mut benchmark_payload) {
                         panic!("Error during benchmarking: {:?}", e);
                     }
-                    send(&mut conn, &sock).await?;
+                    send(&mut conn, &sock).await.unwrap();
                 }
             }
         }
@@ -146,9 +181,32 @@ async fn send(connection: &mut quiche::Connection, socket: &UdpSocket) -> Result
 
         let mut sent = 0;
         while sent < len {
-            let written = socket.send(&send_buf[sent..len]).await?;
+            let written = socket.send(&send_buf[sent..len]).await.unwrap();
             sent += written;
         }
+    }
+}
+
+async fn send_datagram(
+    connection: &mut quiche::Connection,
+    socket: &UdpSocket,
+    datagram: Datagram,
+) -> Result<()> {
+    let mut buf = BytesMut::new();
+    datagram.encode(&mut buf).unwrap();
+    connection.dgram_send(&mut buf).unwrap();
+
+    send(connection, socket).await
+}
+
+async fn send_outgoing(
+    connection: &mut quiche::Connection,
+    socket: &UdpSocket,
+    outgoing: OutgoingPacket,
+) -> Result<()> {
+    match outgoing {
+        OutgoingPacket::Stream(packet) => send_packet(connection, socket, 0, packet).await,
+        OutgoingPacket::Datagram(datagram) => send_datagram(connection, socket, datagram).await,
     }
 }
 
@@ -159,10 +217,9 @@ async fn send_packet(
     packet: Packet,
 ) -> Result<()> {
     let mut buf = BytesMut::new();
-    packet.encode_length_delimited(&mut buf)?;
-    println!("Sending: {:?}", &buf);
+    packet.encode_length_delimited(&mut buf).unwrap();
     while buf.remaining() > 0 {
-        buf.advance(connection.stream_send(stream_id, &buf[..], false)?);
+        buf.advance(connection.stream_send(stream_id, &buf[..], false).unwrap());
     }
 
     send(connection, socket).await
@@ -181,7 +238,8 @@ async fn recv(connection: &mut quiche::Connection, socket: &UdpSocket) -> Result
             }
         },
         None => socket_future.await,
-    }?;
+    }
+    .unwrap();
 
     match connection.recv(&mut recv_buf[..len]) {
         Ok(_) => Ok(()),

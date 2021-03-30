@@ -1,7 +1,8 @@
 use crate::{router, AcpServerError};
 use anyhow::{Context, Result};
 use bytes::{Buf, BytesMut};
-use libacp::proto::{datagram, packet, StartBenchmark};
+use libacp::incoming::{Incoming, IncomingPacket};
+use libacp::proto::{datagram, packet, AcceptTransfer, AckPiece, StartBenchmark};
 use libacp::proto::{Datagram, Packet, Ping};
 use libacp::{proto, AcpError};
 use prost::Message;
@@ -10,7 +11,10 @@ use std::collections::HashMap;
 use std::net::SocketAddr;
 use std::pin::Pin;
 use std::sync::Arc;
+use std::time::Instant;
+use tokio::fs::OpenOptions;
 use tokio::net::UdpSocket;
+use tokio::sync::mpsc;
 use tokio::sync::mpsc::{UnboundedReceiver, UnboundedSender};
 use tokio::time::timeout;
 use tracing::{debug, error, trace};
@@ -26,6 +30,9 @@ pub struct Client {
     dgram_buf: BytesMut,
     stream_bufs: HashMap<u64, BytesMut>,
     state: ClientState,
+    transfers: HashMap<Vec<u8>, UnboundedSender<IncomingPacket>>,
+    transfer_ack_tx: UnboundedSender<proto::AckPiece>,
+    transfer_ack_rx: UnboundedReceiver<proto::AckPiece>,
 }
 
 impl Client {
@@ -43,6 +50,8 @@ impl Client {
         let mut dgram_buf = BytesMut::with_capacity(router::DATAGRAM_SIZE);
         dgram_buf.resize(router::DATAGRAM_SIZE, 0);
 
+        let (transfer_ack_tx, transfer_ack_rx) = mpsc::unbounded_channel();
+
         Client {
             socket,
             addr,
@@ -54,13 +63,32 @@ impl Client {
             term_tx,
             stream_bufs: HashMap::new(),
             state: ClientState::Connected,
+            transfers: HashMap::new(),
+            transfer_ack_tx,
+            transfer_ack_rx,
         }
     }
 
     pub async fn run(mut self) -> Result<()> {
         self.send().await?; // Acknowledge the established connection
         loop {
-            self.recv().await?; // Receive new data into the connection
+            // Perform incoming actions
+            tokio::select! {
+                // Read incoming bytes
+                Ok(bytes) = {
+                    poll_socket(&mut self.connection, &mut self.rx)
+                } => {
+                    self.recv(bytes).await?;
+                }
+
+                // Process outgoing datagrams
+                Some(ack) = {
+                    self.transfer_ack_rx.recv()
+                } => {
+                    self.process_piece_ack(ack).await.unwrap();
+                }
+            }
+
             self.send().await?; // Respond as necessary
 
             if self.connection.is_closed() {
@@ -185,6 +213,51 @@ impl Client {
                         .context("unexpected stop benchmarking packet");
                 }
             },
+
+            packet::Data::StartTransfer(info) => {
+                let file = OpenOptions::new()
+                    .read(true)
+                    .write(true)
+                    .create(true)
+                    .open(String::from_utf8(info.filename).unwrap())
+                    .await
+                    .unwrap();
+
+                let (tx, rx) = mpsc::unbounded_channel();
+                let incoming = Incoming::new(
+                    rx,
+                    self.transfer_ack_tx.clone(),
+                    file,
+                    info.blocks as usize,
+                    info.block_size as usize,
+                    info.piece_size as usize,
+                );
+
+                self.transfers.insert(info.id.clone(), tx);
+                tokio::spawn(async move {
+                    let start = Instant::now();
+                    println!("Starting...");
+                    incoming.run().await;
+                    let dur = Instant::now().duration_since(start).as_millis();
+                    println!("Took: {}ms", dur);
+                });
+
+                let accept =
+                    Packet::new(packet::Data::AcceptTransfer(AcceptTransfer { id: info.id }));
+                self.send_packet(stream_id, accept).await?;
+            }
+
+            packet::Data::AcceptTransfer(_) => unimplemented!(),
+
+            packet::Data::BlockInfo(info) => match self.transfers.get(&info.id) {
+                Some(incoming) => {
+                    incoming.send(IncomingPacket::BlockInfo(info)).unwrap();
+                }
+
+                None => {
+                    panic!("Could not find transfer")
+                }
+            },
         }
 
         Ok(())
@@ -219,9 +292,29 @@ impl Client {
                     }
                 }
             }
+
+            datagram::Data::SendPiece(piece) => match self.transfers.get(&piece.id) {
+                Some(incoming) => {
+                    incoming.send(IncomingPacket::Piece(piece)).unwrap();
+                }
+
+                None => {
+                    panic!("Could not find transfer");
+                }
+            },
+
+            datagram::Data::AckPiece(_) => unimplemented!(),
         }
 
         Ok(())
+    }
+
+    async fn process_piece_ack(&mut self, ack: AckPiece) -> Result<()> {
+        let datagram = Datagram {
+            data: Some(datagram::Data::AckPiece(ack)),
+        };
+
+        self.send_datagram(datagram).await
     }
 
     async fn close(&mut self, app: bool, err: u64, reason: &[u8]) -> Result<()> {
@@ -239,6 +332,13 @@ impl Client {
         }
 
         trace!("packet fully buffered in stream");
+        self.send().await
+    }
+
+    async fn send_datagram(&mut self, datagram: Datagram) -> Result<()> {
+        let mut buf = BytesMut::new();
+        datagram.encode(&mut buf)?;
+        self.connection.dgram_send(&mut buf)?;
         self.send().await
     }
 
@@ -268,21 +368,8 @@ impl Client {
         }
     }
 
-    #[tracing::instrument(level = "trace", skip(self))]
-    async fn recv(&mut self) -> Result<()> {
-        let socket_future = self.rx.recv();
-        let bytes = match self.connection.timeout() {
-            Some(duration) => match timeout(duration, socket_future).await {
-                Ok(bytes) => bytes,
-                Err(_) => {
-                    trace!("timeout lapsed");
-                    self.connection.on_timeout();
-                    return Ok(());
-                }
-            },
-            None => socket_future.await,
-        };
-
+    #[tracing::instrument(level = "trace", skip(self, bytes))]
+    async fn recv(&mut self, bytes: Option<BytesMut>) -> Result<()> {
         let mut bytes = match bytes {
             Some(bytes) => bytes,
             None => {
@@ -304,6 +391,25 @@ impl Client {
             }
         }
     }
+}
+
+async fn poll_socket(
+    connection: &mut quiche::Connection,
+    rx: &mut UnboundedReceiver<BytesMut>,
+) -> Result<Option<BytesMut>> {
+    let result = match connection.timeout() {
+        Some(duration) => match timeout(duration, rx.recv()).await {
+            Ok(bytes) => bytes,
+            Err(_) => {
+                trace!("timeout lapsed");
+                connection.on_timeout();
+                return Err(AcpError::TimeoutLapsed.into());
+            }
+        },
+        None => rx.recv().await,
+    };
+
+    Ok(result)
 }
 
 #[derive(Debug)]
