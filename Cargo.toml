@@ -22,7 +22,7 @@ bytes = "1.0.1"
 prost = "0.7.0"
 quiche = "0.7.0"
 ring = { version = "0.16.20", features = ["std"] }
-thiserror = "1.0.23"
+thiserror = "1.0.24"
 tokio = { version = "1.1.1", features = ["full"] }
 tracing = "0.1.23"
 tracing-subscriber = "0.2.15"
