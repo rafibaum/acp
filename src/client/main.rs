@@ -6,8 +6,9 @@
 
 use anyhow::Result;
 use bytes::{Buf, BytesMut};
-use libacp::outgoing::{Outgoing, OutgoingPacket};
+use libacp::outgoing::{IncomingPacket, Outgoing, OutgoingPacket};
 use libacp::proto;
+use libacp::proto::packet::Data;
 use libacp::proto::{datagram, packet, BenchmarkPayload, StartTransfer, StopBenchmark};
 use libacp::proto::{Datagram, Packet, Ping};
 use prost::Message;
@@ -60,14 +61,13 @@ async fn main() -> Result<()> {
     send_packet(&mut conn, &sock, 0, packet).await.unwrap();
 
     let file = File::open("input.tar.gz").await.unwrap();
-    let block_size = 4 * 1000 * 1000;
-    let blocks = (file.metadata().await.unwrap().len() / block_size) + 1;
+    let filesize = file.metadata().await.unwrap().len();
 
     let packet = Packet::new(packet::Data::StartTransfer(StartTransfer {
         id: vec![72, 82],
         filename: Vec::from("output.tar.gz"),
-        blocks: blocks as u32,
-        block_size: block_size as u32,
+        size: filesize,
+        block_size: 200,
         piece_size: 16000,
     }));
     send_packet(&mut conn, &sock, 0, packet).await.unwrap();
@@ -81,6 +81,7 @@ async fn main() -> Result<()> {
     packet.encode(&mut benchmark_payload).unwrap();
 
     let (tx, mut rx) = tokio::sync::mpsc::channel(16);
+    let mut update_tx = None;
 
     loop {
         tokio::select! {
@@ -129,15 +130,37 @@ async fn main() -> Result<()> {
                         }
                         packet::Data::AcceptTransfer(accept) => {
                             let file = File::open("input.tar.gz").await.unwrap();
+
+                            let (temp_update_tx, update_rx) =
+                                tokio::sync::mpsc::unbounded_channel();
                             let outgoing =
-                                Outgoing::new(accept.id, file, 4 * 1000 * 1000, 16000, tx.clone());
+                                Outgoing::new(accept.id, file, 200, 16000, tx.clone(), update_rx);
+                            update_tx = Some(temp_update_tx);
+
                             tokio::spawn(async move {
                                 outgoing.run().await;
                             });
                         }
 
+                        Data::ControlUpdate(update) => {
+                            if let Some(tx) = update_tx.as_mut() {
+                                if let Err(_) = tx.send(IncomingPacket::ControlUpdate(update)) {
+                                    // No more file transfer
+                                }
+                            }
+                        }
+
+                        Data::AckEndRound(ack) => {
+                            if let Some(tx) = update_tx.as_mut() {
+                                if let Err(_) = tx.send(IncomingPacket::AckEndRound(ack)) {
+                                    // No more file transfer
+                                }
+                            }
+                        }
+
                         packet::Data::StartTransfer(_) => unimplemented!(),
                         packet::Data::BlockInfo(_) => unimplemented!(),
+                        packet::Data::EndRound(_) => unimplemented!(),
                     }
                 }
             }

@@ -10,6 +10,9 @@ message Packet {
     StartTransfer startTransfer = 4;
     BlockInfo blockInfo = 6;
     AcceptTransfer acceptTransfer = 7;
+    ControlUpdate controlUpdate = 8;
+    EndRound endRound = 9;
+    AckEndRound ackEndRound = 10;
   }
 }
 
@@ -17,7 +20,6 @@ message Datagram {
   oneof data {
     BenchmarkPayload benchmarkPayload = 1;
     SendPiece sendPiece = 2;
-    AckPiece ackPiece = 3;
   }
 }
 
@@ -36,9 +38,9 @@ message StopBenchmark {
 message StartTransfer {
   bytes id = 1;
   bytes filename = 2;
-  uint32 blocks = 3;
-  uint32 blockSize = 4;
-  uint32 pieceSize = 5;
+  uint64 size = 3;      // In bytes
+  uint32 blockSize = 4; // In pieces
+  uint32 pieceSize = 5; // In bytes
 }
 
 message AcceptTransfer {
@@ -48,21 +50,30 @@ message AcceptTransfer {
 message BlockInfo {
   bytes id = 1;
   uint32 block = 2;
-  uint32 pieces = 3;
-  bytes checksum = 4;
+  bytes checksum = 3;
 }
 
 message SendPiece {
   bytes id = 1;
-  uint32 block = 2;
-  uint32 piece = 3;
-  bytes data = 4;
+  uint64 piece = 2;
+  uint32 windowSize = 3;
+  bytes data = 15;
 }
 
-message AckPiece {
+message ControlUpdate {
   bytes id = 1;
-  uint32 block = 2;
-  uint32 piece = 3;
+  uint32 received = 2;
+  uint32 maxWindowSize = 3;
+  repeated uint64 lost = 15;
+}
+
+message EndRound {
+  bytes id = 1;
+  uint32 round = 2;
+}
+
+message AckEndRound {
+  uint32 round = 1;
 }
 
 message BenchmarkPayload {

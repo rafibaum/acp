@@ -1,6 +1,6 @@
 #[derive(Clone, PartialEq, ::prost::Message)]
 pub struct Packet {
-    #[prost(oneof = "packet::Data", tags = "1, 2, 3, 4, 6, 7")]
+    #[prost(oneof = "packet::Data", tags = "1, 2, 3, 4, 6, 7, 8, 9, 10")]
     pub data: ::core::option::Option<packet::Data>,
 }
 /// Nested message and enum types in `Packet`.
@@ -19,11 +19,17 @@ pub mod packet {
         BlockInfo(super::BlockInfo),
         #[prost(message, tag = "7")]
         AcceptTransfer(super::AcceptTransfer),
+        #[prost(message, tag = "8")]
+        ControlUpdate(super::ControlUpdate),
+        #[prost(message, tag = "9")]
+        EndRound(super::EndRound),
+        #[prost(message, tag = "10")]
+        AckEndRound(super::AckEndRound),
     }
 }
 #[derive(Clone, PartialEq, ::prost::Message)]
 pub struct Datagram {
-    #[prost(oneof = "datagram::Data", tags = "1, 2, 3")]
+    #[prost(oneof = "datagram::Data", tags = "1, 2")]
     pub data: ::core::option::Option<datagram::Data>,
 }
 /// Nested message and enum types in `Datagram`.
@@ -34,8 +40,6 @@ pub mod datagram {
         BenchmarkPayload(super::BenchmarkPayload),
         #[prost(message, tag = "2")]
         SendPiece(super::SendPiece),
-        #[prost(message, tag = "3")]
-        AckPiece(super::AckPiece),
     }
 }
 #[derive(Clone, PartialEq, ::prost::Message)]
@@ -53,10 +57,13 @@ pub struct StartTransfer {
     pub id: ::prost::alloc::vec::Vec<u8>,
     #[prost(bytes = "vec", tag = "2")]
     pub filename: ::prost::alloc::vec::Vec<u8>,
-    #[prost(uint32, tag = "3")]
-    pub blocks: u32,
+    /// In bytes
+    #[prost(uint64, tag = "3")]
+    pub size: u64,
+    /// In pieces
     #[prost(uint32, tag = "4")]
     pub block_size: u32,
+    /// In bytes
     #[prost(uint32, tag = "5")]
     pub piece_size: u32,
 }
@@ -71,30 +78,42 @@ pub struct BlockInfo {
     pub id: ::prost::alloc::vec::Vec<u8>,
     #[prost(uint32, tag = "2")]
     pub block: u32,
-    #[prost(uint32, tag = "3")]
-    pub pieces: u32,
-    #[prost(bytes = "vec", tag = "4")]
+    #[prost(bytes = "vec", tag = "3")]
     pub checksum: ::prost::alloc::vec::Vec<u8>,
 }
 #[derive(Clone, PartialEq, ::prost::Message)]
 pub struct SendPiece {
     #[prost(bytes = "vec", tag = "1")]
     pub id: ::prost::alloc::vec::Vec<u8>,
-    #[prost(uint32, tag = "2")]
-    pub block: u32,
+    #[prost(uint64, tag = "2")]
+    pub piece: u64,
     #[prost(uint32, tag = "3")]
-    pub piece: u32,
-    #[prost(bytes = "vec", tag = "4")]
+    pub window_size: u32,
+    #[prost(bytes = "vec", tag = "15")]
     pub data: ::prost::alloc::vec::Vec<u8>,
 }
 #[derive(Clone, PartialEq, ::prost::Message)]
-pub struct AckPiece {
+pub struct ControlUpdate {
     #[prost(bytes = "vec", tag = "1")]
     pub id: ::prost::alloc::vec::Vec<u8>,
     #[prost(uint32, tag = "2")]
-    pub block: u32,
+    pub received: u32,
     #[prost(uint32, tag = "3")]
-    pub piece: u32,
+    pub max_window_size: u32,
+    #[prost(uint64, repeated, tag = "15")]
+    pub lost: ::prost::alloc::vec::Vec<u64>,
+}
+#[derive(Clone, PartialEq, ::prost::Message)]
+pub struct EndRound {
+    #[prost(bytes = "vec", tag = "1")]
+    pub id: ::prost::alloc::vec::Vec<u8>,
+    #[prost(uint32, tag = "2")]
+    pub round: u32,
+}
+#[derive(Clone, PartialEq, ::prost::Message)]
+pub struct AckEndRound {
+    #[prost(uint32, tag = "1")]
+    pub round: u32,
 }
 #[derive(Clone, PartialEq, ::prost::Message)]
 pub struct BenchmarkPayload {

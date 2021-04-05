@@ -18,7 +18,9 @@ path = "src/server/main.rs"
 
 [dependencies]
 anyhow = "1.0"
+bitvec = "0.22"
 bytes = "1.0"
+futures = "0.3"
 prost = "0.7"
 quiche = "0.7"
 ring = { version = "0.16", features = ["std"] }

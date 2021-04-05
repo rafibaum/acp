@@ -1,8 +1,9 @@
 use crate::{router, AcpServerError};
 use anyhow::{Context, Result};
 use bytes::{Buf, BytesMut};
-use libacp::incoming::{Incoming, IncomingPacket};
-use libacp::proto::{datagram, packet, AcceptTransfer, AckPiece, StartBenchmark};
+use libacp::incoming::{Incoming, IncomingData, IncomingPacket, OutgoingPacket};
+use libacp::proto::packet::Data;
+use libacp::proto::{datagram, packet, AcceptTransfer, StartBenchmark};
 use libacp::proto::{Datagram, Packet, Ping};
 use libacp::{proto, AcpError};
 use prost::Message;
@@ -31,8 +32,8 @@ pub struct Client {
     stream_bufs: HashMap<u64, BytesMut>,
     state: ClientState,
     transfers: HashMap<Vec<u8>, UnboundedSender<IncomingPacket>>,
-    transfer_ack_tx: UnboundedSender<proto::AckPiece>,
-    transfer_ack_rx: UnboundedReceiver<proto::AckPiece>,
+    outgoing_tx: UnboundedSender<OutgoingPacket>,
+    outgoing_rx: UnboundedReceiver<OutgoingPacket>,
 }
 
 impl Client {
@@ -50,7 +51,7 @@ impl Client {
         let mut dgram_buf = BytesMut::with_capacity(router::DATAGRAM_SIZE);
         dgram_buf.resize(router::DATAGRAM_SIZE, 0);
 
-        let (transfer_ack_tx, transfer_ack_rx) = mpsc::unbounded_channel();
+        let (outgoing_tx, outgoing_rx) = mpsc::unbounded_channel();
 
         Client {
             socket,
@@ -64,8 +65,8 @@ impl Client {
             stream_bufs: HashMap::new(),
             state: ClientState::Connected,
             transfers: HashMap::new(),
-            transfer_ack_tx,
-            transfer_ack_rx,
+            outgoing_tx,
+            outgoing_rx,
         }
     }
 
@@ -81,11 +82,19 @@ impl Client {
                     self.recv(bytes).await?;
                 }
 
-                // Process outgoing datagrams
-                Some(ack) = {
-                    self.transfer_ack_rx.recv()
+                Some(outgoing) = {
+                    self.outgoing_rx.recv()
                 } => {
-                    self.process_piece_ack(ack).await.unwrap();
+                    match outgoing {
+                        // TODO: Make this more general
+                        OutgoingPacket::ControlUpdate(update) => {
+                            self.send_packet(0, Packet::new(Data::ControlUpdate(update))).await?;
+                        }
+
+                        OutgoingPacket::AckEndRound(ack) => {
+                            self.send_packet(0, Packet::new(Data::AckEndRound(ack))).await?;
+                        }
+                    }
                 }
             }
 
@@ -225,12 +234,14 @@ impl Client {
 
                 let (tx, rx) = mpsc::unbounded_channel();
                 let incoming = Incoming::new(
+                    info.id.clone(),
                     rx,
-                    self.transfer_ack_tx.clone(),
+                    self.outgoing_tx.clone(),
                     file,
-                    info.blocks as usize,
-                    info.block_size as usize,
-                    info.piece_size as usize,
+                    info.size,
+                    info.block_size,
+                    info.piece_size,
+                    self.connection.stats().rtt / 8,
                 );
 
                 self.transfers.insert(info.id.clone(), tx);
@@ -247,17 +258,31 @@ impl Client {
                 self.send_packet(stream_id, accept).await?;
             }
 
-            packet::Data::AcceptTransfer(_) => unimplemented!(),
-
             packet::Data::BlockInfo(info) => match self.transfers.get(&info.id) {
                 Some(incoming) => {
-                    incoming.send(IncomingPacket::BlockInfo(info)).unwrap();
+                    incoming
+                        .send(IncomingPacket::Data(IncomingData::BlockInfo(info)))
+                        .unwrap();
                 }
 
                 None => {
                     panic!("Could not find transfer")
                 }
             },
+
+            packet::Data::EndRound(end) => match self.transfers.get(&end.id) {
+                None => {
+                    panic!("Could not find transfer")
+                }
+
+                Some(incoming) => {
+                    incoming.send(IncomingPacket::EndRound(end)).unwrap();
+                }
+            },
+
+            packet::Data::AcceptTransfer(_) => unimplemented!(),
+            packet::Data::ControlUpdate(_) => unimplemented!(),
+            packet::Data::AckEndRound(_) => unimplemented!(),
         }
 
         Ok(())
@@ -295,26 +320,18 @@ impl Client {
 
             datagram::Data::SendPiece(piece) => match self.transfers.get(&piece.id) {
                 Some(incoming) => {
-                    incoming.send(IncomingPacket::Piece(piece)).unwrap();
+                    incoming
+                        .send(IncomingPacket::Data(IncomingData::Piece(piece)))
+                        .unwrap();
                 }
 
                 None => {
                     panic!("Could not find transfer");
                 }
             },
-
-            datagram::Data::AckPiece(_) => unimplemented!(),
         }
 
         Ok(())
-    }
-
-    async fn process_piece_ack(&mut self, ack: AckPiece) -> Result<()> {
-        let datagram = Datagram {
-            data: Some(datagram::Data::AckPiece(ack)),
-        };
-
-        self.send_datagram(datagram).await
     }
 
     async fn close(&mut self, app: bool, err: u64, reason: &[u8]) -> Result<()> {
