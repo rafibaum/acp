@@ -136,7 +136,7 @@ impl Client {
         let mut buf = self
             .stream_bufs
             .remove(&stream_id)
-            .unwrap_or_else(|| BytesMut::new());
+            .unwrap_or_else(BytesMut::new);
         let mut len = buf.len();
         buf.resize(len + QUEUE_BUMP_SIZE, 0);
 
@@ -355,7 +355,7 @@ impl Client {
     async fn send_datagram(&mut self, datagram: Datagram) -> Result<()> {
         let mut buf = BytesMut::new();
         datagram.encode(&mut buf)?;
-        self.connection.dgram_send(&mut buf)?;
+        self.connection.dgram_send(&buf)?;
         self.send().await
     }
 

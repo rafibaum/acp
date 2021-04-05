@@ -65,7 +65,7 @@ pub fn frame(buf: &mut BytesMut) -> Result<Option<Packet>, AcpFrameError> {
         return Ok(None);
     }
 
-    let packet = Packet::decode(&tmp_buf[..len]).map_err(|e| AcpFrameError::MalformedPacket(e))?;
+    let packet = Packet::decode(&tmp_buf[..len]).map_err(AcpFrameError::MalformedPacket)?;
     buf.advance(len_delim_len + len);
     Ok(Some(packet))
 }

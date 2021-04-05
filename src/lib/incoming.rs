@@ -352,7 +352,7 @@ impl BlockInfo {
         };
 
         let mut ctx = digest::Context::new(&digest::SHA256);
-        let mut buf = vec![0 as u8; 65535];
+        let mut buf = vec![0; 65535];
         file.seek(SeekFrom::Start(offset)).await.unwrap();
 
         let mut read = 0;
@@ -366,7 +366,7 @@ impl BlockInfo {
             }
 
             read += len as u64;
-            ctx.update(&mut buf[..len]);
+            ctx.update(&buf[..len]);
 
             if read >= self.bytes {
                 break;

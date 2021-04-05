@@ -99,16 +99,10 @@ impl Outgoing {
                                 panic!("Received next round command for incorrect round");
                             }
 
-                            if self.lost.len() == 0 {
+                            if self.lost.is_empty() {
                                 // All pieces received
                                 break 'main;
                             }
-
-                            // Move to next round
-                            let next = match self.round {
-                                Round::First { .. } => 1,
-                                Round::Retransmit { num, .. } => num + 1,
-                            };
 
                             let mut pieces = BinaryHeap::new();
                             std::mem::swap(&mut pieces, &mut self.lost);
@@ -135,12 +129,11 @@ impl Outgoing {
         self.max_window_size = update.max_window_size;
         self.window -= update.received;
         self.window -= update.lost.len() as u32;
-        self.lost
-            .extend(update.lost.into_iter().map(|x| Reverse(x)));
+        self.lost.extend(update.lost.into_iter().map(Reverse));
     }
 
     async fn next_piece(&mut self) -> Option<(u64, Vec<u8>)> {
-        let mut buf = vec![0 as u8; self.piece_size as usize];
+        let mut buf = vec![0; self.piece_size as usize];
 
         // Identify next piece to read and seek if necessary
         let piece = match &mut self.round {

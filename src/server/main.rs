@@ -10,7 +10,6 @@ mod router;
 use crate::router::Router;
 use anyhow::{Context, Result};
 use thiserror::Error;
-use tracing_subscriber;
 
 /// Server's main function. Starts the router and manages top-level error handling.
 #[tokio::main]

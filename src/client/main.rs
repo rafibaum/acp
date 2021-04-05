@@ -144,7 +144,7 @@ async fn main() -> Result<()> {
 
                         Data::ControlUpdate(update) => {
                             if let Some(tx) = update_tx.as_mut() {
-                                if let Err(_) = tx.send(IncomingPacket::ControlUpdate(update)) {
+                                if tx.send(IncomingPacket::ControlUpdate(update)).is_err() {
                                     // No more file transfer
                                 }
                             }
@@ -152,7 +152,7 @@ async fn main() -> Result<()> {
 
                         Data::AckEndRound(ack) => {
                             if let Some(tx) = update_tx.as_mut() {
-                                if let Err(_) = tx.send(IncomingPacket::AckEndRound(ack)) {
+                                if tx.send(IncomingPacket::AckEndRound(ack)).is_err() {
                                     // No more file transfer
                                 }
                             }
@@ -177,7 +177,7 @@ async fn main() -> Result<()> {
                     .await
                     .unwrap();
                 } else {
-                    if let Err(e) = conn.dgram_send(&mut benchmark_payload) {
+                    if let Err(e) = conn.dgram_send(&benchmark_payload) {
                         panic!("Error during benchmarking: {:?}", e);
                     }
                     send(&mut conn, &sock).await.unwrap();
@@ -217,7 +217,7 @@ async fn send_datagram(
 ) -> Result<()> {
     let mut buf = BytesMut::new();
     datagram.encode(&mut buf).unwrap();
-    connection.dgram_send(&mut buf).unwrap();
+    connection.dgram_send(&buf).unwrap();
 
     send(connection, socket).await
 }
