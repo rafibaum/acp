@@ -3,7 +3,6 @@
 use crate::proto;
 use crate::proto::AckEndRound;
 use bitvec::vec::BitVec;
-use futures::FutureExt;
 use ring::digest;
 use std::collections::{HashMap, HashSet};
 use std::time::Duration;
@@ -29,8 +28,6 @@ pub struct Incoming {
     tx: UnboundedSender<OutgoingPacket>,
     blocks_received: u64,
     highest_piece: u64,
-    window_size: u32,
-    max_window_size: u32,
     pieces_received: BitVec,
     piece_relief: u32,
     marked_to: u64,
@@ -81,8 +78,6 @@ impl Incoming {
             tx,
             blocks_received: 0,
             highest_piece: 0,
-            window_size: 1,
-            max_window_size: 1,
             pieces_received,
             piece_relief: 0,
             marked_to: 0,
@@ -99,7 +94,7 @@ impl Incoming {
         loop {
             tokio::select! {
                 // Receive a packet
-                packet = Self::try_recv(&mut self.rx, self.window_size, &mut self.max_window_size) => {
+                packet = self.rx.recv() => {
                     match packet {
                         Some(packet) => {
                             match packet {
@@ -127,22 +122,6 @@ impl Incoming {
                 }
             }
         }
-    }
-
-    async fn try_recv(
-        rx: &mut UnboundedReceiver<IncomingPacket>,
-        window_size: u32,
-        max_window_size: &mut u32,
-    ) -> Option<IncomingPacket> {
-        if let Some(packet) = rx.recv().now_or_never() {
-            return packet;
-        }
-
-        if window_size == *max_window_size {
-            *max_window_size *= 2;
-        }
-
-        rx.recv().await
     }
 
     async fn next_gc(deadline: Option<&Instant>) -> bool {
@@ -193,8 +172,6 @@ impl Incoming {
                 // TODO: Piece bounds check
                 *self.pieces_received.get_mut(piece.piece as usize).unwrap() = true;
                 self.highest_piece = std::cmp::max(self.highest_piece, piece.piece);
-                // TODO: Keep window size under our max
-                self.window_size = std::cmp::max(piece.window_size, self.window_size);
 
                 if !self.lost.contains(&piece.piece) {
                     // Lost packets already count towards window relief, so don't double count
@@ -252,14 +229,12 @@ impl Incoming {
         let update = proto::ControlUpdate {
             id: self.id.clone(),
             received: self.piece_relief,
-            max_window_size: self.max_window_size,
             lost: newly_lost,
         };
 
         println!(
-            "Update, received: {}, max_window: {}, lost: {}",
+            "Update, received: {}, lost: {}",
             update.received,
-            update.max_window_size,
             self.lost.len()
         );
 

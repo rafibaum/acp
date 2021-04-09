@@ -1,28 +1,30 @@
 //! Types for handling outgoing file transfers
 
-use crate::proto::{
-    datagram, packet, AckEndRound, BlockInfo, ControlUpdate, Datagram, EndRound, Packet, SendPiece,
-};
-use futures::FutureExt;
-use ring::digest;
 use std::cmp::Reverse;
 use std::collections::BinaryHeap;
+
+use ring::digest;
 use tokio::fs::File;
 use tokio::io::{AsyncReadExt, AsyncSeekExt, SeekFrom};
 use tokio::sync::mpsc::{Sender, UnboundedReceiver};
 
+use crate::proto::{
+    datagram, packet, AckEndRound, BlockInfo, ControlUpdate, Datagram, EndRound, Packet, SendPiece,
+};
+
 /// Type for managing information relating to an outgoing file transfer.
 pub struct Outgoing {
+    inner: Inner,
+    rx: UnboundedReceiver<IncomingPacket>,
+}
+
+struct Inner {
     id: Vec<u8>,
     file: File,
     piece_size: u32,
     block_size: u64,
     tx: Sender<OutgoingPacket>,
     ctx: digest::Context,
-    window: u32,
-    window_size: u32,
-    max_window_size: u32,
-    rx: UnboundedReceiver<IncomingPacket>,
     lost: BinaryHeap<Reverse<u64>>,
     round: Round,
     round_stall: bool,
@@ -39,99 +41,40 @@ impl Outgoing {
         rx: UnboundedReceiver<IncomingPacket>,
     ) -> Self {
         Outgoing {
-            id,
-            file,
-            piece_size,
-            block_size: block_size as u64,
-            tx,
-            ctx: digest::Context::new(&digest::SHA256),
-            window: 0,
-            window_size: 1,
-            max_window_size: 1,
+            inner: Inner {
+                id,
+                file,
+                piece_size,
+                block_size: block_size as u64,
+                tx,
+                ctx: digest::Context::new(&digest::SHA256),
+                lost: BinaryHeap::new(),
+                round: Round::First { piece: 0 },
+                round_stall: false,
+            },
             rx,
-            lost: BinaryHeap::new(),
-            round: Round::First { piece: 0 },
-            round_stall: false,
         }
     }
 
     /// Runs an outgoing file transfer.
     pub async fn run(mut self) {
-        'main: loop {
-            'inner: loop {
-                // Outer option indicates if there's a new flow control update to apply
-                // Inner option is whether the receiving channel was closed (error condition)
-                let update = if self.round_stall {
-                    // Don't even try to send a piece, just wait for updates
-                    Some(self.rx.recv().await)
-                } else {
-                    while self.window < self.window_size {
-                        if self.send_piece().await {
-                            // End of round, GOTO top again and wait for flow control updates
-                            break 'inner;
-                        }
-                    }
+        loop {
+            tokio::select! {
+                _ = self.inner.send_piece(), if !self.inner.round_stall => {}
 
-                    match self.rx.recv().now_or_never() {
-                        Some(update) => Some(update),
-                        None => {
-                            // No pending flow control updates, can we increase our window size?
-                            if self.max_window_size > self.window_size {
-                                // We can, let's send more stuff
-                                self.window_size = self.max_window_size;
-                                None
-                            } else {
-                                // We cannot, wait for a flow control update instead
-                                Some(self.rx.recv().await)
-                            }
-                        }
-                    }
-                };
-
-                if let Some(update) = update {
-                    let update = update.expect("Incoming update channel unexpectedly dropped");
-                    match update {
-                        IncomingPacket::ControlUpdate(update) => {
-                            self.apply_update(update);
-                        }
-                        IncomingPacket::AckEndRound(ack) => {
-                            if ack.round != self.round.num() {
-                                panic!("Received next round command for incorrect round");
-                            }
-
-                            if self.lost.is_empty() {
-                                // All pieces received
-                                break 'main;
-                            }
-
-                            let mut pieces = BinaryHeap::new();
-                            std::mem::swap(&mut pieces, &mut self.lost);
-
-                            self.round = match self.round {
-                                Round::First { .. } => Round::Retransmit { num: 1, pieces },
-                                Round::Retransmit { num, .. } => Round::Retransmit {
-                                    num: num + 1,
-                                    pieces,
-                                },
-                            };
-
-                            self.round_stall = false;
-                        }
+                Some(update) = self.rx.recv() => {
+                    if self.inner.apply_update(update) {
+                        break;
                     }
                 }
             }
         }
 
-        println!("Lost: {:?}", self.lost);
+        println!("Lost: {:?}", self.inner.lost);
     }
+}
 
-    fn apply_update(&mut self, update: ControlUpdate) {
-        self.max_window_size = update.max_window_size;
-        self.window -= update.received;
-        self.window -= update.lost.len() as u32;
-        self.lost.extend(update.lost.into_iter().map(Reverse));
-    }
-
+impl Inner {
     async fn next_piece(&mut self) -> Option<(u64, Vec<u8>)> {
         let mut buf = vec![0; self.piece_size as usize];
 
@@ -196,12 +139,12 @@ impl Outgoing {
         Some((piece, buf))
     }
 
-    async fn send_piece(&mut self) -> bool {
+    async fn send_piece(&mut self) {
         let pair = match self.next_piece().await {
             Some(pair) => pair,
             None => {
                 self.end_round().await;
-                return true;
+                return;
             }
         };
 
@@ -210,11 +153,9 @@ impl Outgoing {
         let piece = Datagram::new(datagram::Data::SendPiece(SendPiece {
             id: self.id.clone(),
             piece: piece_num,
-            window_size: self.window_size as u32,
             data: buf,
         }));
         self.tx.send(OutgoingPacket::Datagram(piece)).await.unwrap();
-        self.window += 1;
 
         if let Round::First { .. } = self.round {
             if piece_num + 1 % self.block_size == 0 {
@@ -222,8 +163,6 @@ impl Outgoing {
                 println!("Done sending {}", block);
             }
         }
-
-        false
     }
 
     async fn finish_block(&mut self, block: u32) {
@@ -250,6 +189,39 @@ impl Outgoing {
             .await
             .unwrap();
         self.round_stall = true;
+    }
+
+    fn apply_update(&mut self, update: IncomingPacket) -> bool {
+        match update {
+            IncomingPacket::ControlUpdate(update) => {
+                self.lost.extend(update.lost.into_iter().map(Reverse));
+            }
+            IncomingPacket::AckEndRound(ack) => {
+                if ack.round != self.round.num() {
+                    panic!("Received next round command for incorrect round");
+                }
+
+                if self.lost.is_empty() {
+                    // All pieces received
+                    return true;
+                }
+
+                let mut pieces = BinaryHeap::new();
+                std::mem::swap(&mut pieces, &mut self.lost);
+
+                self.round = match self.round {
+                    Round::First { .. } => Round::Retransmit { num: 1, pieces },
+                    Round::Retransmit { num, .. } => Round::Retransmit {
+                        num: num + 1,
+                        pieces,
+                    },
+                };
+
+                self.round_stall = false;
+            }
+        }
+
+        false
     }
 }
 

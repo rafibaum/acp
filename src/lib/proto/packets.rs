@@ -87,8 +87,6 @@ pub struct SendPiece {
     pub id: ::prost::alloc::vec::Vec<u8>,
     #[prost(uint64, tag = "2")]
     pub piece: u64,
-    #[prost(uint32, tag = "3")]
-    pub window_size: u32,
     #[prost(bytes = "vec", tag = "15")]
     pub data: ::prost::alloc::vec::Vec<u8>,
 }
@@ -98,8 +96,6 @@ pub struct ControlUpdate {
     pub id: ::prost::alloc::vec::Vec<u8>,
     #[prost(uint32, tag = "2")]
     pub received: u32,
-    #[prost(uint32, tag = "3")]
-    pub max_window_size: u32,
     #[prost(uint64, repeated, tag = "15")]
     pub lost: ::prost::alloc::vec::Vec<u64>,
 }

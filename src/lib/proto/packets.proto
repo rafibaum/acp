@@ -56,14 +56,12 @@ message BlockInfo {
 message SendPiece {
   bytes id = 1;
   uint64 piece = 2;
-  uint32 windowSize = 3;
   bytes data = 15;
 }
 
 message ControlUpdate {
   bytes id = 1;
   uint32 received = 2;
-  uint32 maxWindowSize = 3;
   repeated uint64 lost = 15;
 }
 
