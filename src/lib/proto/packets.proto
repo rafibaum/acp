@@ -7,9 +7,9 @@ message Packet {
     Ping ping = 1;
     StartBenchmark startBenchmark = 2;
     StopBenchmark stopBenchmark = 3;
-    StartTransfer startTransfer = 4;
+    RequestUpload requestUpload = 4;
     BlockInfo blockInfo = 6;
-    AcceptTransfer acceptTransfer = 7;
+    AcceptUpload acceptUpload = 7;
     ControlUpdate controlUpdate = 8;
     EndRound endRound = 9;
     AckEndRound ackEndRound = 10;
@@ -35,7 +35,7 @@ message StopBenchmark {
 
 }
 
-message StartTransfer {
+message RequestUpload {
   bytes id = 1;
   bytes filename = 2;
   uint64 size = 3;      // In bytes
@@ -43,7 +43,7 @@ message StartTransfer {
   uint32 pieceSize = 5; // In bytes
 }
 
-message AcceptTransfer {
+message AcceptUpload {
   bytes id = 1;
 }
 
@@ -71,7 +71,8 @@ message EndRound {
 }
 
 message AckEndRound {
-  uint32 round = 1;
+  bytes id = 1;
+  uint32 round = 2;
 }
 
 message BenchmarkPayload {

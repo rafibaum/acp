@@ -3,7 +3,7 @@ use anyhow::{Context, Result};
 use bytes::{Buf, BytesMut};
 use libacp::incoming::{Incoming, IncomingData, IncomingPacket, OutgoingPacket};
 use libacp::proto::packet::Data;
-use libacp::proto::{datagram, packet, AcceptTransfer, StartBenchmark};
+use libacp::proto::{datagram, packet, AcceptUpload, StartBenchmark};
 use libacp::proto::{Datagram, Packet, Ping};
 use libacp::{proto, AcpError};
 use prost::Message;
@@ -123,20 +123,21 @@ impl Client {
     #[tracing::instrument(level = "trace", skip(self))]
     async fn read_streams(&mut self) -> Result<()> {
         for stream_id in self.connection.readable() {
-            self.read_stream(stream_id).await?;
+            let mut buf = self
+                .stream_bufs
+                .remove(&stream_id)
+                .unwrap_or_else(BytesMut::new);
+            self.read_stream(stream_id, &mut buf).await?;
+            self.stream_bufs.insert(stream_id, buf);
         }
 
         Ok(())
     }
 
     #[tracing::instrument(level = "trace", skip(self))]
-    async fn read_stream(&mut self, stream_id: u64) -> Result<()> {
+    async fn read_stream(&mut self, stream_id: u64, mut buf: &mut BytesMut) -> Result<()> {
         const QUEUE_BUMP_SIZE: usize = 1024;
 
-        let mut buf = self
-            .stream_bufs
-            .remove(&stream_id)
-            .unwrap_or_else(BytesMut::new);
         let mut len = buf.len();
         buf.resize(len + QUEUE_BUMP_SIZE, 0);
 
@@ -161,8 +162,6 @@ impl Client {
 
             self.process(stream_id, packet).await?;
         }
-
-        self.stream_bufs.insert(stream_id, buf);
 
         Ok(())
     }
@@ -223,7 +222,7 @@ impl Client {
                 }
             },
 
-            packet::Data::StartTransfer(info) => {
+            packet::Data::RequestUpload(info) => {
                 let file = OpenOptions::new()
                     .read(true)
                     .write(true)
@@ -253,8 +252,7 @@ impl Client {
                     println!("Took: {}ms", dur);
                 });
 
-                let accept =
-                    Packet::new(packet::Data::AcceptTransfer(AcceptTransfer { id: info.id }));
+                let accept = Packet::new(packet::Data::AcceptUpload(AcceptUpload { id: info.id }));
                 self.send_packet(stream_id, accept).await?;
             }
 
@@ -280,7 +278,7 @@ impl Client {
                 }
             },
 
-            packet::Data::AcceptTransfer(_) => unimplemented!(),
+            packet::Data::AcceptUpload(_) => unimplemented!(),
             packet::Data::ControlUpdate(_) => unimplemented!(),
             packet::Data::AckEndRound(_) => unimplemented!(),
         }

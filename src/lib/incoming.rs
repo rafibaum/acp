@@ -277,7 +277,10 @@ impl Incoming {
         self.draining_round = None;
 
         self.tx
-            .send(OutgoingPacket::AckEndRound(AckEndRound { round }))
+            .send(OutgoingPacket::AckEndRound(AckEndRound {
+                id: self.id.clone(),
+                round,
+            }))
             .unwrap();
     }
 }

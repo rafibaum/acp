@@ -234,6 +234,7 @@ pub enum OutgoingPacket {
     Datagram(Datagram),
 }
 
+#[derive(Debug)]
 pub enum IncomingPacket {
     ControlUpdate(ControlUpdate),
     AckEndRound(AckEndRound),

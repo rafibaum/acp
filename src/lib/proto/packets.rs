@@ -14,11 +14,11 @@ pub mod packet {
         #[prost(message, tag = "3")]
         StopBenchmark(super::StopBenchmark),
         #[prost(message, tag = "4")]
-        StartTransfer(super::StartTransfer),
+        RequestUpload(super::RequestUpload),
         #[prost(message, tag = "6")]
         BlockInfo(super::BlockInfo),
         #[prost(message, tag = "7")]
-        AcceptTransfer(super::AcceptTransfer),
+        AcceptUpload(super::AcceptUpload),
         #[prost(message, tag = "8")]
         ControlUpdate(super::ControlUpdate),
         #[prost(message, tag = "9")]
@@ -52,7 +52,7 @@ pub struct StartBenchmark {}
 #[derive(Clone, PartialEq, ::prost::Message)]
 pub struct StopBenchmark {}
 #[derive(Clone, PartialEq, ::prost::Message)]
-pub struct StartTransfer {
+pub struct RequestUpload {
     #[prost(bytes = "vec", tag = "1")]
     pub id: ::prost::alloc::vec::Vec<u8>,
     #[prost(bytes = "vec", tag = "2")]
@@ -68,7 +68,7 @@ pub struct StartTransfer {
     pub piece_size: u32,
 }
 #[derive(Clone, PartialEq, ::prost::Message)]
-pub struct AcceptTransfer {
+pub struct AcceptUpload {
     #[prost(bytes = "vec", tag = "1")]
     pub id: ::prost::alloc::vec::Vec<u8>,
 }
@@ -108,7 +108,9 @@ pub struct EndRound {
 }
 #[derive(Clone, PartialEq, ::prost::Message)]
 pub struct AckEndRound {
-    #[prost(uint32, tag = "1")]
+    #[prost(bytes = "vec", tag = "1")]
+    pub id: ::prost::alloc::vec::Vec<u8>,
+    #[prost(uint32, tag = "2")]
     pub round: u32,
 }
 #[derive(Clone, PartialEq, ::prost::Message)]
