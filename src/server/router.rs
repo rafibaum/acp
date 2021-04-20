@@ -7,7 +7,8 @@ use std::collections::HashMap;
 use std::net::SocketAddr;
 use std::sync::Arc;
 use tokio::net::{ToSocketAddrs, UdpSocket};
-use tokio::sync::mpsc::{unbounded_channel, UnboundedReceiver, UnboundedSender};
+use tokio::sync::mpsc::error::TrySendError;
+use tokio::sync::mpsc::{channel, Receiver, Sender};
 use tracing::{debug, error, info, trace, trace_span, Instrument};
 
 pub const DATAGRAM_SIZE: usize = u16::MAX as usize;
@@ -17,12 +18,12 @@ pub struct Router {
     quic_config: quiche::Config,
     handles: HashMap<ConnectionId<'static>, Handle>,
     rng: ring::rand::SystemRandom,
-    term_tx: UnboundedSender<ConnectionId<'static>>,
-    term_rx: UnboundedReceiver<ConnectionId<'static>>,
+    term_tx: Sender<ConnectionId<'static>>,
+    term_rx: Receiver<ConnectionId<'static>>,
 }
 
 struct Handle {
-    tx: UnboundedSender<BytesMut>,
+    tx: Sender<BytesMut>,
 }
 
 impl Router {
@@ -33,7 +34,7 @@ impl Router {
                 .context("Could not bind server socket to address")?,
         );
 
-        let (term_tx, term_rx) = unbounded_channel();
+        let (term_tx, term_rx) = channel(32);
 
         Ok(Router {
             socket,
@@ -88,14 +89,18 @@ impl Router {
 
         if let Err(err) = match self.handles.get(&header.dcid) {
             Some(handle) => {
-                match handle.tx.send(buf) {
+                match handle.tx.try_send(buf) {
                     Ok(()) => {
                         trace!(size = len, "datagram passed to client handle");
                         Ok(())
                     }
-                    Err(e) => {
+                    Err(TrySendError::Closed(buf)) => {
                         // Client dropped, run a handshake instead
-                        self.handshake(addr, &header, e.0)
+                        self.handshake(addr, &header, buf)
+                    }
+                    Err(TrySendError::Full(_)) => {
+                        // Queue building, drop packet
+                        Ok(())
                     }
                 }
             }
@@ -125,8 +130,8 @@ impl Router {
         self.rng.fill(&mut scid).unwrap(); // Rng should always succeed
         let scid = ConnectionId::from_vec(scid);
 
-        let (tx, rx) = unbounded_channel();
-        tx.send(buf).unwrap(); // Receiver is in scope
+        let (tx, rx) = channel(32);
+        tx.try_send(buf).unwrap(); // Receiver is in scope
 
         let connection = quiche::accept(&scid, None, &mut self.quic_config)
             .context("Failed to initialise QUIC connection to client")?;
@@ -160,7 +165,7 @@ impl Router {
 }
 
 impl Handle {
-    fn new(tx: UnboundedSender<BytesMut>) -> Self {
+    fn new(tx: Sender<BytesMut>) -> Self {
         Handle { tx }
     }
 }

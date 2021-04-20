@@ -6,7 +6,7 @@ use std::collections::BinaryHeap;
 use ring::digest;
 use tokio::fs::File;
 use tokio::io::{AsyncReadExt, AsyncSeekExt, SeekFrom};
-use tokio::sync::mpsc::{Sender, UnboundedReceiver};
+use tokio::sync::mpsc::{Receiver, Sender};
 
 use crate::proto::{
     datagram, packet, AckEndRound, BlockInfo, ControlUpdate, Datagram, EndRound, Packet, SendPiece,
@@ -15,7 +15,7 @@ use crate::proto::{
 /// Type for managing information relating to an outgoing file transfer.
 pub struct Outgoing {
     inner: Inner,
-    rx: UnboundedReceiver<IncomingPacket>,
+    rx: Receiver<IncomingPacket>,
 }
 
 struct Inner {
@@ -38,7 +38,7 @@ impl Outgoing {
         block_size: u32,
         piece_size: u32,
         tx: Sender<OutgoingPacket>,
-        rx: UnboundedReceiver<IncomingPacket>,
+        rx: Receiver<IncomingPacket>,
     ) -> Self {
         Outgoing {
             inner: Inner {
@@ -179,6 +179,7 @@ impl Inner {
     }
 
     async fn end_round(&mut self) {
+        println!("Ending round {}", self.round.num());
         self.tx
             .send(OutgoingPacket::Stream(Packet::new(packet::Data::EndRound(
                 EndRound {
@@ -208,6 +209,8 @@ impl Inner {
 
                 let mut pieces = BinaryHeap::new();
                 std::mem::swap(&mut pieces, &mut self.lost);
+
+                println!("Starting next round");
 
                 self.round = match self.round {
                     Round::First { .. } => Round::Retransmit { num: 1, pieces },
@@ -253,7 +256,7 @@ enum Round {
 impl Round {
     fn num(&self) -> u32 {
         match self {
-            Round::First { .. } => 1,
+            Round::First { .. } => 0,
             Round::Retransmit { num, .. } => *num,
         }
     }

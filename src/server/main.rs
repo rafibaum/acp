@@ -9,6 +9,7 @@ mod router;
 
 use crate::router::Router;
 use anyhow::{Context, Result};
+use quiche::CongestionControlAlgorithm;
 use thiserror::Error;
 
 /// Server's main function. Starts the router and manages top-level error handling.
@@ -34,6 +35,7 @@ async fn main() -> Result<()> {
     config.set_initial_max_stream_data_uni(1000000);
     config.set_max_idle_timeout(30 * 1000);
     config.enable_dgram(true, 512, 512);
+    config.set_cc_algorithm(CongestionControlAlgorithm::CUBIC);
 
     let router = Router::new("127.0.0.1:55280", config).await?;
     router.run().await

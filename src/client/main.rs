@@ -11,14 +11,15 @@ use libacp::proto::packet::Data;
 use libacp::proto::{Datagram, Packet, RequestUpload};
 use libacp::{outgoing, proto};
 use prost::Message;
-use quiche::{Connection, ConnectionId};
+use quiche::{CongestionControlAlgorithm, Connection, ConnectionId};
 use ring::rand::{SecureRandom, SystemRandom};
 use std::collections::HashMap;
 use std::pin::Pin;
+use std::time::{Duration, Instant};
 use tokio::fs::File;
 use tokio::net::UdpSocket;
 use tokio::sync::mpsc;
-use tokio::sync::mpsc::{Receiver, Sender, UnboundedReceiver, UnboundedSender};
+use tokio::sync::mpsc::{Receiver, Sender};
 use tokio::sync::oneshot;
 
 /// Client's main function.
@@ -44,6 +45,7 @@ async fn main() -> Result<()> {
     config.set_initial_max_stream_data_uni(1000000);
     config.set_max_idle_timeout(30 * 1000);
     config.enable_dgram(true, 512, 512);
+    config.set_cc_algorithm(CongestionControlAlgorithm::BBR);
 
     let rng = ring::rand::SystemRandom::new();
     let mut scid = vec![0; quiche::MAX_CONN_ID_LEN];
@@ -52,13 +54,14 @@ async fn main() -> Result<()> {
 
     let conn = quiche::connect(None, &scid, &mut config).unwrap();
 
-    let (tx, rx) = mpsc::unbounded_channel();
+    let (tx, rx) = mpsc::channel(32);
     let client = Client::new(conn, sock, rx, rng);
 
     tx.send(Command::PutFile {
         local: local.clone(),
         remote: remote.clone(),
     })
+    .await
     .unwrap();
 
     // Set up command input
@@ -80,20 +83,19 @@ struct Inner {
     socket: UdpSocket,
     send_buf: BytesMut,
     recv_buf: BytesMut,
-    commands: UnboundedReceiver<Command>,
+    commands: Receiver<Command>,
     rng: SystemRandom,
-    transfers: HashMap<Vec<u8>, UnboundedSender<outgoing::IncomingPacket>>,
+    transfers: HashMap<Vec<u8>, Sender<outgoing::IncomingPacket>>,
     out_tx: Sender<outgoing::OutgoingPacket>,
     dgram_buf: BytesMut,
-    pending_transfers:
-        HashMap<Vec<u8>, oneshot::Sender<UnboundedReceiver<outgoing::IncomingPacket>>>,
+    pending_transfers: HashMap<Vec<u8>, oneshot::Sender<Receiver<outgoing::IncomingPacket>>>,
 }
 
 impl Client {
     pub fn new(
         connection: Pin<Box<Connection>>,
         socket: UdpSocket,
-        commands: UnboundedReceiver<Command>,
+        commands: Receiver<Command>,
         rng: SystemRandom,
     ) -> Self {
         let mut send_buf = BytesMut::with_capacity(65535);
@@ -190,7 +192,7 @@ impl Client {
                             break;
                         }
 
-                        self.read_streams();
+                        self.read_streams().await;
                         self.inner.read_dgrams();
                     }
 
@@ -222,31 +224,44 @@ impl Client {
         }
     }
 
-    fn read_streams(&mut self) {
+    async fn read_streams(&mut self) {
         for stream_id in self.inner.connection.readable() {
             let mut buf = self
                 .stream_bufs
                 .entry(stream_id)
                 .or_insert_with(BytesMut::new);
-            self.inner.read_stream(stream_id, &mut buf);
+            self.inner.read_stream(stream_id, &mut buf).await;
         }
     }
 }
 
 impl Inner {
     async fn send(&mut self) {
+        const PACING_WINDOW: Duration = Duration::from_millis(10);
+
         loop {
-            let len = match self.connection.send(&mut self.send_buf) {
-                Ok(len) => len,
+            let info = match self.connection.send_with_info(&mut self.send_buf) {
+                Ok(info) => info,
                 Err(quiche::Error::Done) => return,
                 err => err.unwrap(),
             };
+
+            let (len, info) = info;
+
+            if let Some(lapsed) = info.send_time.checked_duration_since(Instant::now()) {
+                if lapsed > PACING_WINDOW {
+                    tokio::time::sleep_until(info.send_time.into()).await;
+                }
+            }
 
             let mut to_send = &self.send_buf[..len];
 
             while !to_send.is_empty() {
                 let sent = self.socket.send(&to_send).await.unwrap();
                 //TODO: Ensure progress is made
+                if sent == 0 {
+                    panic!("Nothing sent");
+                }
                 to_send = &to_send[sent..];
             }
         }
@@ -285,7 +300,7 @@ impl Inner {
         }
     }
 
-    fn read_stream(&mut self, stream_id: u64, mut buf: &mut BytesMut) {
+    async fn read_stream(&mut self, stream_id: u64, mut buf: &mut BytesMut) {
         const BUFFER_BUMP: usize = 1024;
 
         let mut len = buf.len();
@@ -306,17 +321,17 @@ impl Inner {
                 Err(e) => panic!("{}", e),
             };
 
-            self.process_packet(stream_id, packet);
+            self.process_packet(stream_id, packet).await;
         }
     }
 
-    fn process_packet(&mut self, _stream_id: u64, packet: Packet) {
+    async fn process_packet(&mut self, _stream_id: u64, packet: Packet) {
         let inner = packet.data.unwrap();
         match inner {
             Data::AcceptUpload(upload) => {
                 let start = self.pending_transfers.remove(&upload.id).unwrap();
 
-                let (in_tx, in_rx) = mpsc::unbounded_channel();
+                let (in_tx, in_rx) = mpsc::channel(32);
                 self.transfers.insert(upload.id, in_tx);
                 start.send(in_rx).unwrap();
             }
@@ -325,6 +340,7 @@ impl Inner {
                 let transfer = self.transfers.get_mut(&end.id).unwrap();
                 transfer
                     .send(outgoing::IncomingPacket::AckEndRound(end))
+                    .await
                     .unwrap();
             }
 
@@ -332,6 +348,7 @@ impl Inner {
                 let transfer = self.transfers.get_mut(&update.id).unwrap();
                 transfer
                     .send(outgoing::IncomingPacket::ControlUpdate(update))
+                    .await
                     .unwrap();
             }
 
@@ -346,18 +363,21 @@ impl Inner {
         }
     }
 
-    fn process_dgram(&mut self, datagram: Datagram) {
-        let inner = datagram.data.unwrap();
-        match inner {
-            _ => unimplemented!(),
-        }
+    fn process_dgram(&mut self, _datagram: Datagram) {
+        unimplemented!()
     }
 
     async fn send_packet(&mut self, stream_id: u64, packet: Packet) {
         let mut buf = BytesMut::new();
         packet.encode_length_delimited(&mut buf).unwrap();
         while buf.remaining() > 0 {
-            buf.advance(self.connection.stream_send(stream_id, &buf, false).unwrap());
+            let written = self.connection.stream_send(stream_id, &buf, false).unwrap();
+
+            if written == 0 {
+                panic!("No progress made");
+            }
+
+            buf.advance(written);
         }
 
         self.send().await;

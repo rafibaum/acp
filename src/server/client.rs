@@ -16,7 +16,7 @@ use std::time::Instant;
 use tokio::fs::OpenOptions;
 use tokio::net::UdpSocket;
 use tokio::sync::mpsc;
-use tokio::sync::mpsc::{UnboundedReceiver, UnboundedSender};
+use tokio::sync::mpsc::{Receiver, Sender};
 use tokio::time::timeout;
 use tracing::{debug, error, trace};
 
@@ -24,16 +24,16 @@ pub struct Client {
     socket: Arc<UdpSocket>,
     addr: SocketAddr,
     connection: Pin<Box<quiche::Connection>>,
-    rx: UnboundedReceiver<BytesMut>,
+    rx: Receiver<BytesMut>,
     scid: ConnectionId<'static>,
-    term_tx: UnboundedSender<ConnectionId<'static>>,
+    term_tx: Sender<ConnectionId<'static>>,
     send_buf: BytesMut,
     dgram_buf: BytesMut,
     stream_bufs: HashMap<u64, BytesMut>,
     state: ClientState,
-    transfers: HashMap<Vec<u8>, UnboundedSender<IncomingPacket>>,
-    outgoing_tx: UnboundedSender<OutgoingPacket>,
-    outgoing_rx: UnboundedReceiver<OutgoingPacket>,
+    transfers: HashMap<Vec<u8>, Sender<IncomingPacket>>,
+    outgoing_tx: Sender<OutgoingPacket>,
+    outgoing_rx: Receiver<OutgoingPacket>,
 }
 
 impl Client {
@@ -41,9 +41,9 @@ impl Client {
         socket: Arc<UdpSocket>,
         addr: SocketAddr,
         connection: Pin<Box<quiche::Connection>>,
-        rx: UnboundedReceiver<BytesMut>,
+        rx: Receiver<BytesMut>,
         scid: ConnectionId<'static>,
-        term_tx: UnboundedSender<ConnectionId<'static>>,
+        term_tx: Sender<ConnectionId<'static>>,
     ) -> Self {
         let mut send_buf = BytesMut::with_capacity(router::DATAGRAM_SIZE);
         send_buf.resize(router::DATAGRAM_SIZE, 0);
@@ -51,7 +51,7 @@ impl Client {
         let mut dgram_buf = BytesMut::with_capacity(router::DATAGRAM_SIZE);
         dgram_buf.resize(router::DATAGRAM_SIZE, 0);
 
-        let (outgoing_tx, outgoing_rx) = mpsc::unbounded_channel();
+        let (outgoing_tx, outgoing_rx) = mpsc::channel(32);
 
         Client {
             socket,
@@ -112,7 +112,7 @@ impl Client {
             }
         }
 
-        if let Err(e) = self.term_tx.send(self.scid) {
+        if let Err(e) = self.term_tx.send(self.scid).await {
             error!("client termination channel dropped");
             return Err(e).context("client termination channel dropped");
         }
@@ -231,7 +231,7 @@ impl Client {
                     .await
                     .unwrap();
 
-                let (tx, rx) = mpsc::unbounded_channel();
+                let (tx, rx) = mpsc::channel(32);
                 let incoming = Incoming::new(
                     info.id.clone(),
                     rx,
@@ -260,6 +260,7 @@ impl Client {
                 Some(incoming) => {
                     incoming
                         .send(IncomingPacket::Data(IncomingData::BlockInfo(info)))
+                        .await
                         .unwrap();
                 }
 
@@ -274,7 +275,7 @@ impl Client {
                 }
 
                 Some(incoming) => {
-                    incoming.send(IncomingPacket::EndRound(end)).unwrap();
+                    incoming.send(IncomingPacket::EndRound(end)).await.unwrap();
                 }
             },
 
@@ -316,17 +317,12 @@ impl Client {
                 }
             }
 
-            datagram::Data::SendPiece(piece) => match self.transfers.get(&piece.id) {
-                Some(incoming) => {
-                    incoming
-                        .send(IncomingPacket::Data(IncomingData::Piece(piece)))
-                        .unwrap();
+            datagram::Data::SendPiece(piece) => {
+                if let Some(incoming) = self.transfers.get(&piece.id) {
+                    // No need to do anything if this fails, just drop the piece silently
+                    let _ = incoming.try_send(IncomingPacket::Data(IncomingData::Piece(piece)));
                 }
-
-                None => {
-                    panic!("Could not find transfer");
-                }
-            },
+            }
         }
 
         Ok(())
@@ -410,7 +406,7 @@ impl Client {
 
 async fn poll_socket(
     connection: &mut quiche::Connection,
-    rx: &mut UnboundedReceiver<BytesMut>,
+    rx: &mut Receiver<BytesMut>,
 ) -> Result<Option<BytesMut>> {
     let result = match connection.timeout() {
         Some(duration) => match timeout(duration, rx.recv()).await {

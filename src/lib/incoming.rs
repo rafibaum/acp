@@ -8,7 +8,7 @@ use std::collections::{HashMap, HashSet};
 use std::time::Duration;
 use tokio::fs::File;
 use tokio::io::{AsyncReadExt, AsyncSeekExt, AsyncWriteExt, SeekFrom};
-use tokio::sync::mpsc::{UnboundedReceiver, UnboundedSender};
+use tokio::sync::mpsc::{Receiver, Sender};
 use tokio::time::Instant;
 
 /// Type for managing information relating to an incoming file transfer.
@@ -24,8 +24,8 @@ pub struct Incoming {
     /// Size of each piece in bytes
     piece_size: u32,
     //TODO: Add reasonable buffer sizes
-    rx: UnboundedReceiver<IncomingPacket>,
-    tx: UnboundedSender<OutgoingPacket>,
+    rx: Receiver<IncomingPacket>,
+    tx: Sender<OutgoingPacket>,
     blocks_received: u64,
     highest_piece: u64,
     pieces_received: BitVec,
@@ -52,8 +52,8 @@ impl Incoming {
     /// Constructs a new incoming file transfer.
     pub fn new(
         id: Vec<u8>,
-        rx: UnboundedReceiver<IncomingPacket>,
-        tx: UnboundedSender<OutgoingPacket>,
+        rx: Receiver<IncomingPacket>,
+        tx: Sender<OutgoingPacket>,
         file: File,
         file_size: u64,
         block_size: u32,
@@ -105,6 +105,7 @@ impl Incoming {
                                 }
 
                                 IncomingPacket::EndRound(end) => {
+                                    println!("Ending round {}", end.round);
                                     self.next_gc = Some(Instant::now() + self.gc_interval);
                                     self.draining_round = Some(DrainState::Draining(end.round));
                                 }
@@ -118,7 +119,7 @@ impl Incoming {
                 // GC triggered
                 true = Self::next_gc(self.next_gc.as_ref()) => {
                     self.next_gc = None;
-                    self.gc();
+                    self.gc().await;
                 }
             }
         }
@@ -211,7 +212,7 @@ impl Incoming {
         false
     }
 
-    fn gc(&mut self) {
+    async fn gc(&mut self) {
         let mut newly_lost = Vec::with_capacity(self.marked.len());
         for marked in &self.marked {
             if !self.pieces_received[*marked as usize] {
@@ -238,13 +239,16 @@ impl Incoming {
             self.lost.len()
         );
 
-        self.tx.send(OutgoingPacket::ControlUpdate(update)).unwrap();
+        self.tx
+            .send(OutgoingPacket::ControlUpdate(update))
+            .await
+            .unwrap();
 
         self.piece_relief = 0;
 
         let range = match self.draining_round {
             Some(DrainState::Drained(round)) => {
-                self.end_round(round);
+                self.end_round(round).await;
                 return;
             }
             Some(DrainState::Draining(round)) => {
@@ -265,22 +269,25 @@ impl Incoming {
         if !self.marked.is_empty() {
             self.schedule_gc();
         } else if let Some(draining) = self.draining_round {
-            self.end_round(draining.round());
+            self.end_round(draining.round()).await;
         }
     }
 
-    fn end_round(&mut self, round: u32) {
+    async fn end_round(&mut self, round: u32) {
         self.highest_piece = 0;
         self.marked_to = 0;
         self.marked.clear();
         self.lost.clear();
         self.draining_round = None;
 
+        println!("Starting next round");
+
         self.tx
             .send(OutgoingPacket::AckEndRound(AckEndRound {
                 id: self.id.clone(),
                 round,
             }))
+            .await
             .unwrap();
     }
 }
