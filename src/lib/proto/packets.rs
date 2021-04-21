@@ -96,6 +96,8 @@ pub struct ControlUpdate {
     pub id: ::prost::alloc::vec::Vec<u8>,
     #[prost(uint32, tag = "2")]
     pub received: u32,
+    #[prost(uint64, tag = "3")]
+    pub window_size: u64,
     #[prost(uint64, repeated, tag = "15")]
     pub lost: ::prost::alloc::vec::Vec<u64>,
 }

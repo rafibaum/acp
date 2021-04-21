@@ -12,6 +12,8 @@ use crate::proto::{
     datagram, packet, AckEndRound, BlockInfo, ControlUpdate, Datagram, EndRound, Packet, SendPiece,
 };
 
+const INITIAL_WINDOW_SIZE: u64 = 4;
+
 /// Type for managing information relating to an outgoing file transfer.
 pub struct Outgoing {
     inner: Inner,
@@ -54,7 +56,7 @@ impl Outgoing {
                 round: Round::First { piece: 0 },
                 round_stall: false,
                 pieces_in_flight: 0,
-                window_size: 32,
+                window_size: INITIAL_WINDOW_SIZE,
             },
             rx,
         }
@@ -207,6 +209,8 @@ impl Inner {
                 self.pieces_in_flight = self
                     .pieces_in_flight
                     .saturating_sub(update.lost.len() as u64);
+
+                self.window_size = update.window_size;
 
                 self.lost.extend(update.lost.into_iter().map(Reverse));
             }
