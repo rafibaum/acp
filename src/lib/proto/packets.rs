@@ -1,6 +1,6 @@
 #[derive(Clone, PartialEq, ::prost::Message)]
 pub struct Packet {
-    #[prost(oneof = "packet::Data", tags = "1, 2, 3, 4, 6, 7, 8, 9, 10")]
+    #[prost(oneof = "packet::Data", tags = "1, 2, 3, 4, 6, 7, 8, 9, 10, 11, 12")]
     pub data: ::core::option::Option<packet::Data>,
 }
 /// Nested message and enum types in `Packet`.
@@ -25,6 +25,10 @@ pub mod packet {
         EndRound(super::EndRound),
         #[prost(message, tag = "10")]
         AckEndRound(super::AckEndRound),
+        #[prost(message, tag = "11")]
+        RequestDownload(super::RequestDownload),
+        #[prost(message, tag = "12")]
+        AcceptDownload(super::AcceptDownload),
     }
 }
 #[derive(Clone, PartialEq, ::prost::Message)]
@@ -71,6 +75,27 @@ pub struct RequestUpload {
 pub struct AcceptUpload {
     #[prost(bytes = "vec", tag = "1")]
     pub id: ::prost::alloc::vec::Vec<u8>,
+}
+#[derive(Clone, PartialEq, ::prost::Message)]
+pub struct RequestDownload {
+    #[prost(bytes = "vec", tag = "1")]
+    pub id: ::prost::alloc::vec::Vec<u8>,
+    #[prost(bytes = "vec", tag = "2")]
+    pub filename: ::prost::alloc::vec::Vec<u8>,
+}
+#[derive(Clone, PartialEq, ::prost::Message)]
+pub struct AcceptDownload {
+    #[prost(bytes = "vec", tag = "1")]
+    pub id: ::prost::alloc::vec::Vec<u8>,
+    /// In bytes
+    #[prost(uint64, tag = "2")]
+    pub size: u64,
+    /// In pieces
+    #[prost(uint32, tag = "3")]
+    pub block_size: u32,
+    /// In bytes
+    #[prost(uint32, tag = "4")]
+    pub piece_size: u32,
 }
 #[derive(Clone, PartialEq, ::prost::Message)]
 pub struct BlockInfo {

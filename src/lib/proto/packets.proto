@@ -13,6 +13,8 @@ message Packet {
     ControlUpdate controlUpdate = 8;
     EndRound endRound = 9;
     AckEndRound ackEndRound = 10;
+    RequestDownload requestDownload = 11;
+    AcceptDownload acceptDownload = 12;
   }
 }
 
@@ -45,6 +47,18 @@ message RequestUpload {
 
 message AcceptUpload {
   bytes id = 1;
+}
+
+message RequestDownload {
+  bytes id = 1;
+  bytes filename = 2;
+}
+
+message AcceptDownload {
+  bytes id = 1;
+  uint64 size = 2;      // In bytes
+  uint32 blockSize = 3; // In pieces
+  uint32 pieceSize = 4; // In bytes
 }
 
 message BlockInfo {

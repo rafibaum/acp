@@ -6,21 +6,29 @@
 
 use anyhow::Result;
 use bytes::{Buf, BytesMut};
+use libacp::incoming::Incoming;
+use libacp::minmax::Minmax;
 use libacp::outgoing::Outgoing;
 use libacp::proto::packet::Data;
+use libacp::proto::{datagram, AcceptDownload, RequestDownload};
 use libacp::proto::{Datagram, Packet, RequestUpload};
-use libacp::{outgoing, proto};
+use libacp::{incoming, outgoing, proto};
 use prost::Message;
 use quiche::{CongestionControlAlgorithm, Connection, ConnectionId};
 use ring::rand::{SecureRandom, SystemRandom};
 use std::collections::HashMap;
 use std::pin::Pin;
+use std::sync::atomic::AtomicU64;
+use std::sync::atomic::Ordering;
+use std::sync::Arc;
 use std::time::{Duration, Instant};
-use tokio::fs::File;
+use tokio::fs::{File, OpenOptions};
 use tokio::net::UdpSocket;
 use tokio::sync::mpsc;
 use tokio::sync::mpsc::{Receiver, Sender};
 use tokio::sync::oneshot;
+
+const RTT_WINDOW: Duration = Duration::from_secs(10);
 
 /// Client's main function.
 #[tokio::main]
@@ -57,7 +65,7 @@ async fn main() -> Result<()> {
     let (tx, rx) = mpsc::channel(32);
     let client = Client::new(conn, sock, rx, rng);
 
-    tx.send(Command::PutFile {
+    tx.send(Command::GetFile {
         local: local.clone(),
         remote: remote.clone(),
     })
@@ -75,6 +83,7 @@ async fn main() -> Result<()> {
 struct Client {
     inner: Inner,
     out_rx: Receiver<outgoing::OutgoingPacket>,
+    in_rx: Receiver<incoming::OutgoingPacket>,
     stream_bufs: HashMap<u64, BytesMut>,
 }
 
@@ -85,10 +94,29 @@ struct Inner {
     recv_buf: BytesMut,
     commands: Receiver<Command>,
     rng: SystemRandom,
-    transfers: HashMap<Vec<u8>, Sender<outgoing::IncomingPacket>>,
-    out_tx: Sender<outgoing::OutgoingPacket>,
+    outgoing: OutgoingTransfers,
+    incoming: IncomingTransfers,
     dgram_buf: BytesMut,
-    pending_transfers: HashMap<Vec<u8>, oneshot::Sender<Receiver<outgoing::IncomingPacket>>>,
+    rtt_min: Arc<AtomicU64>,
+    rtt_filter: Minmax<Instant, u64>,
+}
+
+struct OutgoingTransfers {
+    transfers: HashMap<Vec<u8>, Sender<outgoing::IncomingPacket>>,
+    tx: Sender<outgoing::OutgoingPacket>,
+    pending: HashMap<Vec<u8>, oneshot::Sender<Receiver<outgoing::IncomingPacket>>>,
+}
+
+struct IncomingTransfers {
+    transfers: HashMap<Vec<u8>, Sender<incoming::IncomingPacket>>,
+    tx: Sender<incoming::OutgoingPacket>,
+    pending: HashMap<Vec<u8>, oneshot::Sender<DownloadStartHandle>>,
+}
+
+#[derive(Debug)]
+struct DownloadStartHandle {
+    rx: Receiver<incoming::IncomingPacket>,
+    info: AcceptDownload,
 }
 
 impl Client {
@@ -108,6 +136,9 @@ impl Client {
         dgram_buf.resize(65535, 0);
 
         let (out_tx, out_rx) = mpsc::channel(32);
+        let (in_tx, in_rx) = mpsc::channel(32);
+
+        let rtt = connection.stats().rtt.as_nanos() as u64;
 
         Client {
             inner: Inner {
@@ -117,13 +148,23 @@ impl Client {
                 recv_buf,
                 commands,
                 rng,
-                transfers: HashMap::new(),
+                outgoing: OutgoingTransfers {
+                    transfers: HashMap::new(),
+                    tx: out_tx,
+                    pending: HashMap::new(),
+                },
+                incoming: IncomingTransfers {
+                    transfers: HashMap::new(),
+                    tx: in_tx,
+                    pending: HashMap::new(),
+                },
                 dgram_buf,
-                out_tx,
-                pending_transfers: HashMap::new(),
+                rtt_min: Arc::new(AtomicU64::new(rtt)),
+                rtt_filter: Minmax::new(Instant::now(), rtt),
             },
             stream_bufs: HashMap::new(),
             out_rx,
+            in_rx,
         }
     }
 
@@ -154,7 +195,7 @@ impl Client {
                     self.inner.rng.fill(&mut id).unwrap();
 
                     let (start_tx, start_rx) = oneshot::channel();
-                    self.inner.pending_transfers.insert(id.clone(), start_tx);
+                    self.inner.outgoing.pending.insert(id.clone(), start_tx);
 
                     let packet = Packet::new(Data::RequestUpload(RequestUpload {
                         id: id.clone(),
@@ -165,12 +206,52 @@ impl Client {
                     }));
                     self.inner.send_packet(0, packet).await;
 
-                    let out_tx = self.inner.out_tx.clone();
+                    let out_tx = self.inner.outgoing.tx.clone();
 
                     tokio::spawn(async {
                         let in_rx = start_rx.await.unwrap();
                         let outgoing = Outgoing::new(id, file, 200, 16000, out_tx, in_rx);
                         outgoing.run().await
+                    })
+                }
+
+                Command::GetFile { local, remote } => {
+                    let file = OpenOptions::new()
+                        .read(true)
+                        .write(true)
+                        .create(true)
+                        .open(local)
+                        .await
+                        .unwrap();
+
+                    let mut id = vec![0; 16];
+                    self.inner.rng.fill(&mut id).unwrap();
+
+                    let (start_tx, start_rx) = oneshot::channel();
+                    self.inner.incoming.pending.insert(id.clone(), start_tx);
+
+                    let packet = Packet::new(Data::RequestDownload(RequestDownload {
+                        id: id.clone(),
+                        filename: remote.into_bytes(),
+                    }));
+                    self.inner.send_packet(0, packet).await;
+
+                    let in_tx = self.inner.incoming.tx.clone();
+                    let rtt_min = self.inner.rtt_min.clone();
+
+                    tokio::spawn(async {
+                        let start = start_rx.await.unwrap();
+                        let incoming = Incoming::new(
+                            id,
+                            start.rx,
+                            in_tx,
+                            file,
+                            start.info.size,
+                            start.info.block_size,
+                            start.info.piece_size,
+                            rtt_min,
+                        );
+                        incoming.run().await
                     })
                 }
             };
@@ -192,15 +273,28 @@ impl Client {
                             break;
                         }
 
+                        let new_min = self.inner.rtt_filter.running_min(RTT_WINDOW, Instant::now(), self.inner.connection.stats().rtt.as_nanos() as u64);
+                        if new_min != self.inner.rtt_min.load(Ordering::Relaxed) {
+                            self.inner.rtt_min.store(new_min, Ordering::Relaxed);
+                        }
+
                         self.read_streams().await;
-                        self.inner.read_dgrams();
+                        self.inner.read_dgrams().await;
                     }
 
                     // Outgoing traffic
+                    // TODO: Merge
                     Some(to_send) = self.out_rx.recv() => {
                         match to_send {
                             outgoing::OutgoingPacket::Stream(packet) => self.inner.send_packet(0, packet).await,
                             outgoing::OutgoingPacket::Datagram(datagram) => self.inner.send_datagram(datagram).await,
+                        }
+                    }
+
+                    Some(to_send) = self.in_rx.recv() => {
+                        match to_send {
+                            incoming::OutgoingPacket::AckEndRound(ack) => self.inner.send_packet(0, Packet::new(Data::AckEndRound(ack))).await,
+                            incoming::OutgoingPacket::ControlUpdate(update) => self.inner.send_packet(0, Packet::new(Data::ControlUpdate(update))).await,
                         }
                     }
                 }
@@ -329,15 +423,15 @@ impl Inner {
         let inner = packet.data.unwrap();
         match inner {
             Data::AcceptUpload(upload) => {
-                let start = self.pending_transfers.remove(&upload.id).unwrap();
+                let start = self.outgoing.pending.remove(&upload.id).unwrap();
 
                 let (in_tx, in_rx) = mpsc::channel(32);
-                self.transfers.insert(upload.id, in_tx);
+                self.outgoing.transfers.insert(upload.id, in_tx);
                 start.send(in_rx).unwrap();
             }
 
             Data::AckEndRound(end) => {
-                let transfer = self.transfers.get_mut(&end.id).unwrap();
+                let transfer = self.outgoing.transfers.get_mut(&end.id).unwrap();
                 transfer
                     .send(outgoing::IncomingPacket::AckEndRound(end))
                     .await
@@ -345,26 +439,74 @@ impl Inner {
             }
 
             Data::ControlUpdate(update) => {
-                let transfer = self.transfers.get_mut(&update.id).unwrap();
+                let transfer = self.outgoing.transfers.get_mut(&update.id).unwrap();
                 transfer
                     .send(outgoing::IncomingPacket::ControlUpdate(update))
                     .await
                     .unwrap();
             }
 
-            _ => unimplemented!(),
+            Data::AcceptDownload(download) => {
+                let start = self.incoming.pending.remove(&download.id).unwrap();
+
+                let (in_tx, in_rx) = mpsc::channel(32);
+                self.incoming.transfers.insert(download.id.clone(), in_tx);
+                start
+                    .send(DownloadStartHandle {
+                        rx: in_rx,
+                        info: download,
+                    })
+                    .unwrap();
+            }
+
+            Data::BlockInfo(info) => {
+                let transfer = self.incoming.transfers.get_mut(&info.id).unwrap();
+                transfer
+                    .send(incoming::IncomingPacket::Data(
+                        incoming::IncomingData::BlockInfo(info),
+                    ))
+                    .await
+                    .unwrap();
+            }
+
+            Data::EndRound(end) => {
+                let transfer = self.incoming.transfers.get_mut(&end.id).unwrap();
+                transfer
+                    .send(incoming::IncomingPacket::EndRound(end))
+                    .await
+                    .unwrap();
+            }
+
+            Data::Ping(_) => unimplemented!(),
+            Data::StartBenchmark(_) => unimplemented!(),
+            Data::StopBenchmark(_) => unimplemented!(),
+            Data::RequestUpload(_) => unimplemented!(),
+            Data::RequestDownload(_) => unimplemented!(),
         }
     }
 
-    fn read_dgrams(&mut self) {
+    async fn read_dgrams(&mut self) {
         while let Ok(len) = self.connection.dgram_recv(&mut self.dgram_buf) {
             let datagram = Datagram::decode(&self.dgram_buf[..len]).unwrap();
-            self.process_dgram(datagram);
+            self.process_dgram(datagram).await;
         }
     }
 
-    fn process_dgram(&mut self, _datagram: Datagram) {
-        unimplemented!()
+    async fn process_dgram(&mut self, datagram: Datagram) {
+        let data = datagram.data.unwrap();
+        match data {
+            datagram::Data::SendPiece(piece) => {
+                let transfer = self.incoming.transfers.get_mut(&piece.id).unwrap();
+                transfer
+                    .send(incoming::IncomingPacket::Data(
+                        incoming::IncomingData::Piece(piece),
+                    ))
+                    .await
+                    .unwrap();
+            }
+
+            datagram::Data::BenchmarkPayload(_) => unimplemented!(),
+        }
     }
 
     async fn send_packet(&mut self, stream_id: u64, packet: Packet) {
@@ -393,5 +535,6 @@ impl Inner {
 
 #[derive(Debug)]
 enum Command {
+    GetFile { local: String, remote: String },
     PutFile { local: String, remote: String },
 }

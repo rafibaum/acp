@@ -1,11 +1,11 @@
 use crate::{router, AcpServerError};
 use anyhow::{Context, Result};
 use bytes::{Buf, BytesMut};
-use libacp::incoming::{Incoming, IncomingData, IncomingPacket, OutgoingPacket};
 use libacp::minmax::Minmax;
 use libacp::proto::packet::Data;
-use libacp::proto::{datagram, packet, AcceptUpload, StartBenchmark};
+use libacp::proto::{datagram, packet, AcceptDownload, AcceptUpload, StartBenchmark};
 use libacp::proto::{Datagram, Packet, Ping};
+use libacp::{incoming, outgoing};
 use libacp::{proto, AcpError};
 use prost::Message;
 use quiche::ConnectionId;
@@ -15,7 +15,7 @@ use std::pin::Pin;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
-use tokio::fs::OpenOptions;
+use tokio::fs::{File, OpenOptions};
 use tokio::net::UdpSocket;
 use tokio::sync::mpsc;
 use tokio::sync::mpsc::{Receiver, Sender};
@@ -35,11 +35,23 @@ pub struct Client {
     dgram_buf: BytesMut,
     stream_bufs: HashMap<u64, BytesMut>,
     state: ClientState,
-    transfers: HashMap<Vec<u8>, Sender<IncomingPacket>>,
-    outgoing_tx: Sender<OutgoingPacket>,
-    outgoing_rx: Receiver<OutgoingPacket>,
+    //TODO: Handle terminated transfers
+    incoming: IncomingTransfers,
+    outgoing: OutgoingTransfers,
     rtt_filter: Minmax<Instant, u64>,
     rtt_min: Arc<AtomicU64>,
+}
+
+struct IncomingTransfers {
+    transfers: HashMap<Vec<u8>, Sender<incoming::IncomingPacket>>,
+    tx: Sender<incoming::OutgoingPacket>,
+    rx: Receiver<incoming::OutgoingPacket>,
+}
+
+struct OutgoingTransfers {
+    transfers: HashMap<Vec<u8>, Sender<outgoing::IncomingPacket>>,
+    tx: Sender<outgoing::OutgoingPacket>,
+    rx: Receiver<outgoing::OutgoingPacket>,
 }
 
 impl Client {
@@ -57,6 +69,7 @@ impl Client {
         let mut dgram_buf = BytesMut::with_capacity(router::DATAGRAM_SIZE);
         dgram_buf.resize(router::DATAGRAM_SIZE, 0);
 
+        let (incoming_tx, incoming_rx) = mpsc::channel(32);
         let (outgoing_tx, outgoing_rx) = mpsc::channel(32);
 
         let rtt_min = connection.stats().rtt.as_nanos() as u64;
@@ -72,9 +85,16 @@ impl Client {
             term_tx,
             stream_bufs: HashMap::new(),
             state: ClientState::Connected,
-            transfers: HashMap::new(),
-            outgoing_tx,
-            outgoing_rx,
+            incoming: IncomingTransfers {
+                transfers: HashMap::new(),
+                tx: incoming_tx,
+                rx: incoming_rx,
+            },
+            outgoing: OutgoingTransfers {
+                transfers: HashMap::new(),
+                tx: outgoing_tx,
+                rx: outgoing_rx,
+            },
             rtt_min: Arc::new(AtomicU64::new(rtt_min)),
             rtt_filter: Minmax::new(Instant::now(), rtt_min),
         }
@@ -92,17 +112,30 @@ impl Client {
                     self.recv(bytes).await?;
                 }
 
+                // TODO: Merge the two below
                 Some(outgoing) = {
-                    self.outgoing_rx.recv()
+                    self.incoming.rx.recv()
                 } => {
                     match outgoing {
                         // TODO: Make this more general
-                        OutgoingPacket::ControlUpdate(update) => {
+                        incoming::OutgoingPacket::ControlUpdate(update) => {
                             self.send_packet(0, Packet::new(Data::ControlUpdate(update))).await?;
                         }
 
-                        OutgoingPacket::AckEndRound(ack) => {
+                        incoming::OutgoingPacket::AckEndRound(ack) => {
                             self.send_packet(0, Packet::new(Data::AckEndRound(ack))).await?;
+                        }
+                    }
+                }
+
+                Some(data) = self.outgoing.rx.recv() => {
+                    match data {
+                        outgoing::OutgoingPacket::Stream(packet) => {
+                            self.send_packet(0, packet).await?;
+                        }
+
+                        outgoing::OutgoingPacket::Datagram(datagram) => {
+                            self.send_datagram(datagram).await?;
                         }
                     }
                 }
@@ -251,10 +284,10 @@ impl Client {
                     .unwrap();
 
                 let (tx, rx) = mpsc::channel(32);
-                let incoming = Incoming::new(
+                let incoming = incoming::Incoming::new(
                     info.id.clone(),
                     rx,
-                    self.outgoing_tx.clone(),
+                    self.incoming.tx.clone(),
                     file,
                     info.size,
                     info.block_size,
@@ -262,10 +295,10 @@ impl Client {
                     self.rtt_min.clone(),
                 );
 
-                self.transfers.insert(info.id.clone(), tx);
+                self.incoming.transfers.insert(info.id.clone(), tx);
                 tokio::spawn(async move {
                     let start = Instant::now();
-                    println!("Starting...");
+                    println!("Starting upload...");
                     incoming.run().await;
                     let dur = Instant::now().duration_since(start).as_millis();
                     println!("Took: {}ms", dur);
@@ -275,10 +308,12 @@ impl Client {
                 self.send_packet(stream_id, accept).await?;
             }
 
-            packet::Data::BlockInfo(info) => match self.transfers.get(&info.id) {
+            packet::Data::BlockInfo(info) => match self.incoming.transfers.get(&info.id) {
                 Some(incoming) => {
                     incoming
-                        .send(IncomingPacket::Data(IncomingData::BlockInfo(info)))
+                        .send(incoming::IncomingPacket::Data(
+                            incoming::IncomingData::BlockInfo(info),
+                        ))
                         .await
                         .unwrap();
                 }
@@ -288,19 +323,80 @@ impl Client {
                 }
             },
 
-            packet::Data::EndRound(end) => match self.transfers.get(&end.id) {
+            packet::Data::EndRound(end) => match self.incoming.transfers.get(&end.id) {
                 None => {
                     panic!("Could not find transfer")
                 }
 
                 Some(incoming) => {
-                    incoming.send(IncomingPacket::EndRound(end)).await.unwrap();
+                    incoming
+                        .send(incoming::IncomingPacket::EndRound(end))
+                        .await
+                        .unwrap();
                 }
             },
 
+            packet::Data::RequestDownload(download) => {
+                const BLOCK_SIZE: u32 = 200;
+                const PIECE_SIZE: u32 = 16000;
+
+                let file = File::open(String::from_utf8(download.filename).unwrap())
+                    .await
+                    .unwrap();
+                let filesize = file.metadata().await.unwrap().len();
+
+                let (tx, rx) = mpsc::channel(32);
+                let outgoing = outgoing::Outgoing::new(
+                    download.id.clone(),
+                    file,
+                    BLOCK_SIZE,
+                    PIECE_SIZE,
+                    self.outgoing.tx.clone(),
+                    rx,
+                );
+
+                self.outgoing.transfers.insert(download.id.clone(), tx);
+                tokio::spawn(async move {
+                    let start = Instant::now();
+                    println!("Starting download...");
+                    outgoing.run().await;
+                    let dur = Instant::now().duration_since(start).as_millis();
+                    println!("Took: {}ms", dur);
+                });
+
+                let accept = Packet::new(packet::Data::AcceptDownload(AcceptDownload {
+                    id: download.id,
+                    size: filesize,
+                    block_size: BLOCK_SIZE,
+                    piece_size: PIECE_SIZE,
+                }));
+                self.send_packet(stream_id, accept).await?;
+            }
+
+            packet::Data::ControlUpdate(update) => match self.outgoing.transfers.get(&update.id) {
+                Some(outgoing) => {
+                    outgoing
+                        .send(outgoing::IncomingPacket::ControlUpdate(update))
+                        .await
+                        .unwrap();
+                }
+
+                None => panic!("Could not find transfer"),
+            },
+
+            packet::Data::AckEndRound(ack) => match self.outgoing.transfers.get(&ack.id) {
+                Some(outgoing) => {
+                    outgoing
+                        .send(outgoing::IncomingPacket::AckEndRound(ack))
+                        .await
+                        .unwrap();
+                }
+
+                None => panic!("Could not find transfer"),
+            },
+
             packet::Data::AcceptUpload(_) => unimplemented!(),
-            packet::Data::ControlUpdate(_) => unimplemented!(),
-            packet::Data::AckEndRound(_) => unimplemented!(),
+            packet::Data::AcceptDownload(_) => unimplemented!(),
         }
 
         Ok(())
@@ -337,9 +433,11 @@ impl Client {
             }
 
             datagram::Data::SendPiece(piece) => {
-                if let Some(incoming) = self.transfers.get(&piece.id) {
+                if let Some(incoming) = self.incoming.transfers.get(&piece.id) {
                     // No need to do anything if this fails, just drop the piece silently
-                    let _ = incoming.try_send(IncomingPacket::Data(IncomingData::Piece(piece)));
+                    let _ = incoming.try_send(incoming::IncomingPacket::Data(
+                        incoming::IncomingData::Piece(piece),
+                    ));
                 }
             }
         }
