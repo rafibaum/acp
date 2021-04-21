@@ -6,6 +6,7 @@ use std::error::Error;
 use std::fmt::{Display, Formatter};
 
 pub mod incoming;
+pub mod minmax;
 pub mod outgoing;
 pub mod proto;
 

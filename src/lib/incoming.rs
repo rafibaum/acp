@@ -1,15 +1,22 @@
 //! Types for handling incoming file transfers.
 
+use crate::minmax::Minmax;
 use crate::proto;
 use crate::proto::AckEndRound;
 use bitvec::vec::BitVec;
 use ring::digest;
 use std::collections::{HashMap, HashSet};
+use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::Arc;
 use std::time::Duration;
 use tokio::fs::File;
 use tokio::io::{AsyncReadExt, AsyncSeekExt, AsyncWriteExt, SeekFrom};
 use tokio::sync::mpsc::{Receiver, Sender};
 use tokio::time::Instant;
+
+const INITIAL_AVG_PIECE_TIME: Duration = Duration::from_millis(1);
+const PIECE_WINDOW: Duration = Duration::from_secs(10);
+const GC_INTERVAL: u64 = 2;
 
 /// Type for managing information relating to an incoming file transfer.
 pub struct Incoming {
@@ -33,9 +40,12 @@ pub struct Incoming {
     marked_to: u64,
     marked: HashSet<u64>,
     lost: HashSet<u64>,
-    gc_interval: Duration,
     next_gc: Option<Instant>,
     draining_round: Option<DrainState>,
+    piece_start: Option<Instant>,
+    piece_min: Duration,
+    piece_filter: Minmax<Instant, Duration>,
+    rtt: Arc<AtomicU64>,
 }
 
 struct BlockInfo {
@@ -58,7 +68,7 @@ impl Incoming {
         file_size: u64,
         block_size: u32,
         piece_size: u32,
-        gc_interval: Duration,
+        rtt: Arc<AtomicU64>,
     ) -> Self {
         let blocks_cap = (file_size / piece_size as u64 + 1) / block_size as u64 + 1;
         let pieces_cap = file_size / piece_size as u64 + 1;
@@ -83,9 +93,12 @@ impl Incoming {
             marked_to: 0,
             marked: HashSet::new(),
             lost: HashSet::new(),
-            gc_interval,
             next_gc: None,
             draining_round: None,
+            piece_start: None,
+            piece_min: INITIAL_AVG_PIECE_TIME,
+            piece_filter: Minmax::new(Instant::now(), INITIAL_AVG_PIECE_TIME),
+            rtt,
         }
     }
 
@@ -106,7 +119,8 @@ impl Incoming {
 
                                 IncomingPacket::EndRound(end) => {
                                     println!("Ending round {}", end.round);
-                                    self.next_gc = Some(Instant::now() + self.gc_interval);
+                                    let gc_interval = Duration::from_nanos(self.rtt.load(Ordering::Relaxed) / GC_INTERVAL);
+                                    self.next_gc = Some(Instant::now() + gc_interval);
                                     self.draining_round = Some(DrainState::Draining(end.round));
                                 }
                             }
@@ -141,7 +155,8 @@ impl Incoming {
             return;
         }
 
-        self.next_gc = Some(Instant::now() + self.gc_interval);
+        let gc_interval = Duration::from_nanos(self.rtt.load(Ordering::Relaxed) / GC_INTERVAL);
+        self.next_gc = Some(Instant::now() + gc_interval);
     }
 
     async fn read_packet(&mut self, packet: IncomingData) -> bool {
@@ -149,7 +164,10 @@ impl Incoming {
 
         let block_num = match &packet {
             IncomingData::BlockInfo(info) => info.block as u64,
-            IncomingData::Piece(piece) => piece.piece / self.block_size as u64,
+            IncomingData::Piece(piece) => {
+                self.piece_start = Some(Instant::now());
+                piece.piece / self.block_size as u64
+            }
         };
 
         // Get block or insert empty block information
@@ -181,7 +199,14 @@ impl Incoming {
 
                 let offset = piece.piece * self.piece_size as u64;
                 println!("Received piece {}", piece.piece);
-                block.write_piece(&mut self.file, offset, &piece.data).await
+                let block_status = block.write_piece(&mut self.file, offset, &piece.data).await;
+
+                let elapsed = Instant::now() - self.piece_start.unwrap();
+                self.piece_min =
+                    self.piece_filter
+                        .running_min(PIECE_WINDOW, Instant::now(), elapsed);
+
+                block_status
             }
         };
 
@@ -227,16 +252,23 @@ impl Incoming {
             self.lost.extend(newly_lost.iter());
         }
 
+        let rtt = self.rtt.load(Ordering::Relaxed);
+        let mut window_size = rtt / self.piece_min.as_nanos() as u64;
+        // Build in a queue of double and assume minimum piece time is half of regular time
+        window_size *= 4;
+
         let update = proto::ControlUpdate {
             id: self.id.clone(),
             received: self.piece_relief,
             lost: newly_lost,
+            window_size,
         };
 
         println!(
-            "Update, received: {}, lost: {}",
+            "Update, received: {}, lost: {}, window: {}",
             update.received,
-            self.lost.len()
+            self.lost.len(),
+            window_size
         );
 
         self.tx

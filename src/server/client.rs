@@ -2,6 +2,7 @@ use crate::{router, AcpServerError};
 use anyhow::{Context, Result};
 use bytes::{Buf, BytesMut};
 use libacp::incoming::{Incoming, IncomingData, IncomingPacket, OutgoingPacket};
+use libacp::minmax::Minmax;
 use libacp::proto::packet::Data;
 use libacp::proto::{datagram, packet, AcceptUpload, StartBenchmark};
 use libacp::proto::{Datagram, Packet, Ping};
@@ -11,14 +12,17 @@ use quiche::ConnectionId;
 use std::collections::HashMap;
 use std::net::SocketAddr;
 use std::pin::Pin;
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
-use std::time::Instant;
+use std::time::{Duration, Instant};
 use tokio::fs::OpenOptions;
 use tokio::net::UdpSocket;
 use tokio::sync::mpsc;
 use tokio::sync::mpsc::{Receiver, Sender};
 use tokio::time::timeout;
 use tracing::{debug, error, trace};
+
+const RTT_WINDOW: Duration = Duration::from_secs(10);
 
 pub struct Client {
     socket: Arc<UdpSocket>,
@@ -34,6 +38,8 @@ pub struct Client {
     transfers: HashMap<Vec<u8>, Sender<IncomingPacket>>,
     outgoing_tx: Sender<OutgoingPacket>,
     outgoing_rx: Receiver<OutgoingPacket>,
+    rtt_filter: Minmax<Instant, u64>,
+    rtt_min: Arc<AtomicU64>,
 }
 
 impl Client {
@@ -53,6 +59,8 @@ impl Client {
 
         let (outgoing_tx, outgoing_rx) = mpsc::channel(32);
 
+        let rtt_min = connection.stats().rtt.as_nanos() as u64;
+
         Client {
             socket,
             addr,
@@ -67,6 +75,8 @@ impl Client {
             transfers: HashMap::new(),
             outgoing_tx,
             outgoing_rx,
+            rtt_min: Arc::new(AtomicU64::new(rtt_min)),
+            rtt_filter: Minmax::new(Instant::now(), rtt_min),
         }
     }
 
@@ -107,6 +117,15 @@ impl Client {
             }
 
             if self.connection.is_established() && !self.connection.is_draining() {
+                let new_min = self.rtt_filter.running_min(
+                    RTT_WINDOW,
+                    Instant::now(),
+                    self.connection.stats().rtt.as_nanos() as u64,
+                );
+                if self.rtt_min.load(Ordering::Relaxed) != new_min {
+                    self.rtt_min.store(new_min, Ordering::Relaxed);
+                }
+
                 self.read_streams().await?;
                 self.read_dgrams().await?;
             }
@@ -240,7 +259,7 @@ impl Client {
                     info.size,
                     info.block_size,
                     info.piece_size,
-                    self.connection.stats().rtt / 8,
+                    self.rtt_min.clone(),
                 );
 
                 self.transfers.insert(info.id.clone(), tx);

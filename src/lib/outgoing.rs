@@ -12,6 +12,8 @@ use crate::proto::{
     datagram, packet, AckEndRound, BlockInfo, ControlUpdate, Datagram, EndRound, Packet, SendPiece,
 };
 
+const INITIAL_WINDOW_SIZE: u64 = 4;
+
 /// Type for managing information relating to an outgoing file transfer.
 pub struct Outgoing {
     inner: Inner,
@@ -28,6 +30,8 @@ struct Inner {
     lost: BinaryHeap<Reverse<u64>>,
     round: Round,
     round_stall: bool,
+    pieces_in_flight: u64,
+    window_size: u64,
 }
 
 impl Outgoing {
@@ -51,6 +55,8 @@ impl Outgoing {
                 lost: BinaryHeap::new(),
                 round: Round::First { piece: 0 },
                 round_stall: false,
+                pieces_in_flight: 0,
+                window_size: INITIAL_WINDOW_SIZE,
             },
             rx,
         }
@@ -60,7 +66,8 @@ impl Outgoing {
     pub async fn run(mut self) {
         loop {
             tokio::select! {
-                _ = self.inner.send_piece(), if !self.inner.round_stall => {}
+                //TODO: Reevaluate use of select (futures can be cancelled)
+                _ = self.inner.send_piece(), if !self.inner.round_stall && self.inner.pieces_in_flight < self.inner.window_size => {}
 
                 Some(update) = self.rx.recv() => {
                     if self.inner.apply_update(update) {
@@ -156,6 +163,7 @@ impl Inner {
             data: buf,
         }));
         self.tx.send(OutgoingPacket::Datagram(piece)).await.unwrap();
+        self.pieces_in_flight += 1;
 
         if let Round::First { .. } = self.round {
             if piece_num + 1 % self.block_size == 0 {
@@ -195,6 +203,15 @@ impl Inner {
     fn apply_update(&mut self, update: IncomingPacket) -> bool {
         match update {
             IncomingPacket::ControlUpdate(update) => {
+                // Decrement pieces in flight
+                self.pieces_in_flight =
+                    self.pieces_in_flight.saturating_sub(update.received as u64);
+                self.pieces_in_flight = self
+                    .pieces_in_flight
+                    .saturating_sub(update.lost.len() as u64);
+
+                self.window_size = update.window_size;
+
                 self.lost.extend(update.lost.into_iter().map(Reverse));
             }
             IncomingPacket::AckEndRound(ack) => {
