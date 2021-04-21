@@ -11,6 +11,8 @@ use tokio::io::{AsyncReadExt, AsyncSeekExt, AsyncWriteExt, SeekFrom};
 use tokio::sync::mpsc::{Receiver, Sender};
 use tokio::time::Instant;
 
+const PIECE_AVG_WEIGHT: f64 = 1.0 / 8.0;
+
 /// Type for managing information relating to an incoming file transfer.
 pub struct Incoming {
     id: Vec<u8>,
@@ -36,6 +38,8 @@ pub struct Incoming {
     gc_interval: Duration,
     next_gc: Option<Instant>,
     draining_round: Option<DrainState>,
+    piece_start: Option<Instant>,
+    piece_avg: Option<Duration>,
 }
 
 struct BlockInfo {
@@ -86,6 +90,8 @@ impl Incoming {
             gc_interval,
             next_gc: None,
             draining_round: None,
+            piece_start: None,
+            piece_avg: None,
         }
     }
 
@@ -149,7 +155,10 @@ impl Incoming {
 
         let block_num = match &packet {
             IncomingData::BlockInfo(info) => info.block as u64,
-            IncomingData::Piece(piece) => piece.piece / self.block_size as u64,
+            IncomingData::Piece(piece) => {
+                self.piece_start = Some(Instant::now());
+                piece.piece / self.block_size as u64
+            }
         };
 
         // Get block or insert empty block information
@@ -181,7 +190,17 @@ impl Incoming {
 
                 let offset = piece.piece * self.piece_size as u64;
                 println!("Received piece {}", piece.piece);
-                block.write_piece(&mut self.file, offset, &piece.data).await
+                let block_status = block.write_piece(&mut self.file, offset, &piece.data).await;
+
+                let elapsed = Instant::now() - self.piece_start.unwrap();
+                self.piece_avg = Some(match self.piece_avg {
+                    None => elapsed,
+                    Some(prev) => {
+                        prev.mul_f64(1.0 - PIECE_AVG_WEIGHT) + elapsed.mul_f64(PIECE_AVG_WEIGHT)
+                    }
+                });
+
+                block_status
             }
         };
 
