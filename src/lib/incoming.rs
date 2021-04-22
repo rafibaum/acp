@@ -104,9 +104,13 @@ impl Incoming {
     /// Starts an incoming file transfer.
     pub async fn run(mut self) {
         loop {
+            // Splitting borrows
+            let rx = &mut self.rx;
+            let next_gc = self.next_gc.as_ref();
+
             tokio::select! {
                 // Receive a packet
-                packet = self.rx.recv() => {
+                packet = rx.recv() => {
                     match packet {
                         Some(packet) => {
                             match packet {
@@ -130,22 +134,20 @@ impl Incoming {
                 }
 
                 // GC triggered
-                true = Self::next_gc(self.next_gc.as_ref()) => {
+                true = async {
+                    match next_gc {
+                        Some(deadline) => {
+                            tokio::time::sleep_until(*deadline).await;
+                            true
+                        }
+
+                        None => false,
+                    }
+                } => {
                     self.next_gc = None;
                     self.gc().await;
                 }
             }
-        }
-    }
-
-    async fn next_gc(deadline: Option<&Instant>) -> bool {
-        match deadline {
-            Some(deadline) => {
-                tokio::time::sleep_until(*deadline).await;
-                true
-            }
-
-            None => false,
         }
     }
 

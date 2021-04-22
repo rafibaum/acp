@@ -88,10 +88,12 @@ impl Client {
             // Perform incoming actions
             tokio::select! {
                 // Read incoming bytes
-                Ok(bytes) = {
+                result = {
                     poll_socket(&mut self.connection, &mut self.rx)
                 } => {
-                    self.recv(bytes).await?;
+                    if let Ok(bytes) = result {
+                        self.recv(bytes).await?;
+                    }
                 }
 
                 Some(data) = {

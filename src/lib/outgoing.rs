@@ -12,6 +12,7 @@ use crate::proto::{
     datagram, packet, AckEndRound, BlockInfo, ControlUpdate, Datagram, EndRound, OutgoingData,
     Packet, SendPiece,
 };
+use futures::FutureExt;
 
 const INITIAL_WINDOW_SIZE: u64 = 4;
 
@@ -66,19 +67,29 @@ impl Outgoing {
     /// Runs an outgoing file transfer.
     pub async fn run(mut self) {
         loop {
-            tokio::select! {
-                //TODO: Reevaluate use of select (futures can be cancelled)
-                _ = self.inner.send_piece(), if !self.inner.round_stall && self.inner.pieces_in_flight < self.inner.window_size => {}
-
-                Some(update) = self.rx.recv() => {
-                    if self.inner.apply_update(update) {
-                        break;
-                    }
+            if self.inner.round_stall || self.inner.pieces_in_flight >= self.inner.window_size {
+                if self.await_update().await {
+                    break;
                 }
+            } else {
+                if let Some(true) = self.await_update().now_or_never() {
+                    // Transfer finished
+                    break;
+                }
+
+                self.inner.send_piece().await;
             }
         }
 
         println!("Lost: {:?}", self.inner.lost);
+    }
+
+    async fn await_update(&mut self) -> bool {
+        if let Some(update) = self.rx.recv().await {
+            self.inner.apply_update(update)
+        } else {
+            false
+        }
     }
 }
 
@@ -201,6 +212,7 @@ impl Inner {
         self.round_stall = true;
     }
 
+    //TODO: Review return types
     fn apply_update(&mut self, update: IncomingPacket) -> bool {
         match update {
             IncomingPacket::ControlUpdate(update) => {
