@@ -11,23 +11,25 @@ use std::fmt::{Display, Formatter};
 use std::net::IpAddr;
 
 impl Packet {
-    /// Create a new packet of the specified type.
-    /// Convenience constructor for the auto-generated packet types since they can get unwieldy
-    /// otherwise.
+    /// Create a new packet.
     pub fn new(data: packet::Data) -> Self {
         Packet { data: Some(data) }
     }
 }
 
 impl Datagram {
+    /// Create a new datagram.
     pub fn new(data: datagram::Data) -> Self {
         Datagram { data: Some(data) }
     }
 }
 
+/// Outbound network traffic.
 #[derive(Debug)]
 pub enum OutgoingData {
+    /// Data that should be sent in a stream.
     Stream(Packet),
+    /// Data that should be sent as a datagram.
     Datagram(Datagram),
 }
 

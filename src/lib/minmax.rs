@@ -61,6 +61,7 @@ struct MinmaxSample<I, V> {
     value: V,
 }
 
+/// Windowed minimum/maximum filter
 pub struct Minmax<I, V> {
     estimate: [MinmaxSample<I, V>; 3],
 }
@@ -71,6 +72,7 @@ where
     I: Copy + PartialEq + Sub<I, Output = D>,
     V: Copy + PartialOrd,
 {
+    /// Constructs a new min/max filter with an initial measurement
     pub fn new(time: I, val: V) -> Self {
         Minmax {
             estimate: [MinmaxSample { time, value: val }; 3],

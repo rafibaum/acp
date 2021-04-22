@@ -246,9 +246,12 @@ impl Inner {
     }
 }
 
+/// Network traffic routed into an outbound transfer.
 #[derive(Debug)]
 pub enum IncomingPacket {
+    /// A flow control update for detecting lost packets and managing the sending window.
     ControlUpdate(ControlUpdate),
+    /// The receiver is ready to start the next round.
     AckEndRound(AckEndRound),
 }
 

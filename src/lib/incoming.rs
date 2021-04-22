@@ -406,10 +406,13 @@ enum BlockStatus {
 /// A packet routed into an incoming transfer.
 #[derive(Debug)]
 pub enum IncomingPacket {
+    /// A packet which will further transfer progress (like a piece).
     Data(IncomingData),
+    /// Informing the receiver the round has ended so it can start draining the transfer.
     EndRound(proto::EndRound),
 }
 
+/// Network traffic routed into an inbound transfer.
 #[derive(Debug)]
 pub enum IncomingData {
     /// An incoming piece.

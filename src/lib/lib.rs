@@ -5,8 +5,10 @@
 use std::error::Error;
 use std::fmt::{Display, Formatter};
 
+pub use crate::minmax::Minmax;
+
 pub mod incoming;
-pub mod minmax;
+mod minmax;
 pub mod outgoing;
 pub mod proto;
 

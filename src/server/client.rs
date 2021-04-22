@@ -1,9 +1,9 @@
 use crate::{router, AcpServerError};
 use anyhow::{Context, Result};
 use bytes::{Buf, BytesMut};
-use libacp::minmax::Minmax;
 use libacp::proto::{datagram, packet, AcceptDownload, AcceptUpload, OutgoingData, StartBenchmark};
 use libacp::proto::{Datagram, Packet, Ping};
+use libacp::Minmax;
 use libacp::{incoming, outgoing};
 use libacp::{proto, AcpError};
 use prost::Message;
@@ -409,12 +409,6 @@ impl Client {
             }
         }
 
-        Ok(())
-    }
-
-    async fn close(&mut self, app: bool, err: u64, reason: &[u8]) -> Result<()> {
-        self.connection.close(app, err, reason)?;
-        self.send().await?;
         Ok(())
     }
 

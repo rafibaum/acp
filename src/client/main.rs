@@ -7,11 +7,11 @@
 use anyhow::Result;
 use bytes::{Buf, BytesMut};
 use libacp::incoming::Incoming;
-use libacp::minmax::Minmax;
 use libacp::outgoing::Outgoing;
 use libacp::proto::packet::Data;
 use libacp::proto::{datagram, AcceptDownload, OutgoingData, RequestDownload};
 use libacp::proto::{Datagram, Packet, RequestUpload};
+use libacp::Minmax;
 use libacp::{incoming, outgoing, proto};
 use prost::Message;
 use quiche::{CongestionControlAlgorithm, Connection, ConnectionId};
