@@ -450,7 +450,7 @@ mod tests {
         assert_eq!(f.estimate[1].value, bw_200);
         assert_eq!(f.estimate[2].value, bw_200);
 
-        time += 2;
+        time += 3;
         bw_min = f.running_min(win, time, bw_500);
         assert_eq!(bw_min, bw_500);
         assert_eq!(f.estimate[1].value, bw_500);
