@@ -10,7 +10,7 @@ use libacp::incoming::Incoming;
 use libacp::minmax::Minmax;
 use libacp::outgoing::Outgoing;
 use libacp::proto::packet::Data;
-use libacp::proto::{datagram, AcceptDownload, RequestDownload};
+use libacp::proto::{datagram, AcceptDownload, OutgoingData, RequestDownload};
 use libacp::proto::{Datagram, Packet, RequestUpload};
 use libacp::{incoming, outgoing, proto};
 use prost::Message;
@@ -83,8 +83,7 @@ async fn main() -> Result<()> {
 
 struct Client {
     inner: Inner,
-    out_rx: Receiver<outgoing::OutgoingPacket>,
-    in_rx: Receiver<incoming::OutgoingPacket>,
+    out_rx: Receiver<OutgoingData>,
     stream_bufs: HashMap<u64, BytesMut>,
 }
 
@@ -97,6 +96,7 @@ struct Inner {
     rng: SystemRandom,
     outgoing: OutgoingTransfers,
     incoming: IncomingTransfers,
+    out_tx: Sender<OutgoingData>,
     dgram_buf: BytesMut,
     rtt_min: Arc<AtomicU64>,
     rtt_filter: Minmax<Instant, u64>,
@@ -104,13 +104,11 @@ struct Inner {
 
 struct OutgoingTransfers {
     transfers: HashMap<Vec<u8>, Sender<outgoing::IncomingPacket>>,
-    tx: Sender<outgoing::OutgoingPacket>,
     pending: HashMap<Vec<u8>, oneshot::Sender<Receiver<outgoing::IncomingPacket>>>,
 }
 
 struct IncomingTransfers {
     transfers: HashMap<Vec<u8>, Sender<incoming::IncomingPacket>>,
-    tx: Sender<incoming::OutgoingPacket>,
     pending: HashMap<Vec<u8>, oneshot::Sender<DownloadStartHandle>>,
 }
 
@@ -137,7 +135,6 @@ impl Client {
         dgram_buf.resize(65535, 0);
 
         let (out_tx, out_rx) = mpsc::channel(32);
-        let (in_tx, in_rx) = mpsc::channel(32);
 
         let rtt = connection.stats().rtt.as_nanos() as u64;
 
@@ -151,21 +148,19 @@ impl Client {
                 rng,
                 outgoing: OutgoingTransfers {
                     transfers: HashMap::new(),
-                    tx: out_tx,
                     pending: HashMap::new(),
                 },
                 incoming: IncomingTransfers {
                     transfers: HashMap::new(),
-                    tx: in_tx,
                     pending: HashMap::new(),
                 },
+                out_tx,
                 dgram_buf,
                 rtt_min: Arc::new(AtomicU64::new(rtt)),
                 rtt_filter: Minmax::new(Instant::now(), rtt),
             },
             stream_bufs: HashMap::new(),
             out_rx,
-            in_rx,
         }
     }
 
@@ -206,7 +201,7 @@ impl Client {
                     }));
                     self.inner.send_packet(0, packet).await;
 
-                    let out_tx = self.inner.outgoing.tx.clone();
+                    let out_tx = self.inner.out_tx.clone();
 
                     tokio::spawn(async {
                         let in_rx = start_rx.await.unwrap();
@@ -236,7 +231,7 @@ impl Client {
                     }));
                     self.inner.send_packet(0, packet).await;
 
-                    let in_tx = self.inner.incoming.tx.clone();
+                    let in_tx = self.inner.out_tx.clone();
                     let rtt_min = self.inner.rtt_min.clone();
 
                     tokio::spawn(async {
@@ -283,18 +278,10 @@ impl Client {
                     }
 
                     // Outgoing traffic
-                    // TODO: Merge
                     Some(to_send) = self.out_rx.recv() => {
                         match to_send {
-                            outgoing::OutgoingPacket::Stream(packet) => self.inner.send_packet(0, packet).await,
-                            outgoing::OutgoingPacket::Datagram(datagram) => self.inner.send_datagram(datagram).await,
-                        }
-                    }
-
-                    Some(to_send) = self.in_rx.recv() => {
-                        match to_send {
-                            incoming::OutgoingPacket::AckEndRound(ack) => self.inner.send_packet(0, Packet::new(Data::AckEndRound(ack))).await,
-                            incoming::OutgoingPacket::ControlUpdate(update) => self.inner.send_packet(0, Packet::new(Data::ControlUpdate(update))).await,
+                            OutgoingData::Stream(packet) => self.inner.send_packet(0, packet).await,
+                            OutgoingData::Datagram(datagram) => self.inner.send_datagram(datagram).await,
                         }
                     }
                 }

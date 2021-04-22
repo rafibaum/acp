@@ -2,8 +2,7 @@ use crate::{router, AcpServerError};
 use anyhow::{Context, Result};
 use bytes::{Buf, BytesMut};
 use libacp::minmax::Minmax;
-use libacp::proto::packet::Data;
-use libacp::proto::{datagram, packet, AcceptDownload, AcceptUpload, StartBenchmark};
+use libacp::proto::{datagram, packet, AcceptDownload, AcceptUpload, OutgoingData, StartBenchmark};
 use libacp::proto::{Datagram, Packet, Ping};
 use libacp::{incoming, outgoing};
 use libacp::{proto, AcpError};
@@ -36,22 +35,12 @@ pub struct Client {
     stream_bufs: HashMap<u64, BytesMut>,
     state: ClientState,
     //TODO: Handle terminated transfers
-    incoming: IncomingTransfers,
-    outgoing: OutgoingTransfers,
+    incoming: HashMap<Vec<u8>, Sender<incoming::IncomingPacket>>,
+    outgoing: HashMap<Vec<u8>, Sender<outgoing::IncomingPacket>>,
+    out_tx: Sender<OutgoingData>,
+    out_rx: Receiver<OutgoingData>,
     rtt_filter: Minmax<Instant, u64>,
     rtt_min: Arc<AtomicU64>,
-}
-
-struct IncomingTransfers {
-    transfers: HashMap<Vec<u8>, Sender<incoming::IncomingPacket>>,
-    tx: Sender<incoming::OutgoingPacket>,
-    rx: Receiver<incoming::OutgoingPacket>,
-}
-
-struct OutgoingTransfers {
-    transfers: HashMap<Vec<u8>, Sender<outgoing::IncomingPacket>>,
-    tx: Sender<outgoing::OutgoingPacket>,
-    rx: Receiver<outgoing::OutgoingPacket>,
 }
 
 impl Client {
@@ -69,8 +58,7 @@ impl Client {
         let mut dgram_buf = BytesMut::with_capacity(router::DATAGRAM_SIZE);
         dgram_buf.resize(router::DATAGRAM_SIZE, 0);
 
-        let (incoming_tx, incoming_rx) = mpsc::channel(32);
-        let (outgoing_tx, outgoing_rx) = mpsc::channel(32);
+        let (out_tx, out_rx) = mpsc::channel(32);
 
         let rtt_min = connection.stats().rtt.as_nanos() as u64;
 
@@ -85,16 +73,10 @@ impl Client {
             term_tx,
             stream_bufs: HashMap::new(),
             state: ClientState::Connected,
-            incoming: IncomingTransfers {
-                transfers: HashMap::new(),
-                tx: incoming_tx,
-                rx: incoming_rx,
-            },
-            outgoing: OutgoingTransfers {
-                transfers: HashMap::new(),
-                tx: outgoing_tx,
-                rx: outgoing_rx,
-            },
+            incoming: HashMap::new(),
+            outgoing: HashMap::new(),
+            out_tx,
+            out_rx,
             rtt_min: Arc::new(AtomicU64::new(rtt_min)),
             rtt_filter: Minmax::new(Instant::now(), rtt_min),
         }
@@ -112,29 +94,15 @@ impl Client {
                     self.recv(bytes).await?;
                 }
 
-                // TODO: Merge the two below
-                Some(outgoing) = {
-                    self.incoming.rx.recv()
+                Some(data) = {
+                    self.out_rx.recv()
                 } => {
-                    match outgoing {
-                        // TODO: Make this more general
-                        incoming::OutgoingPacket::ControlUpdate(update) => {
-                            self.send_packet(0, Packet::new(Data::ControlUpdate(update))).await?;
-                        }
-
-                        incoming::OutgoingPacket::AckEndRound(ack) => {
-                            self.send_packet(0, Packet::new(Data::AckEndRound(ack))).await?;
-                        }
-                    }
-                }
-
-                Some(data) = self.outgoing.rx.recv() => {
                     match data {
-                        outgoing::OutgoingPacket::Stream(packet) => {
+                        OutgoingData::Stream(packet) => {
                             self.send_packet(0, packet).await?;
                         }
 
-                        outgoing::OutgoingPacket::Datagram(datagram) => {
+                        OutgoingData::Datagram(datagram) => {
                             self.send_datagram(datagram).await?;
                         }
                     }
@@ -286,7 +254,7 @@ impl Client {
                 let incoming = incoming::Incoming::new(
                     info.id.clone(),
                     rx,
-                    self.incoming.tx.clone(),
+                    self.out_tx.clone(),
                     file,
                     info.size,
                     info.block_size,
@@ -294,7 +262,7 @@ impl Client {
                     self.rtt_min.clone(),
                 );
 
-                self.incoming.transfers.insert(info.id.clone(), tx);
+                self.incoming.insert(info.id.clone(), tx);
                 tokio::spawn(async move {
                     let start = Instant::now();
                     println!("Starting upload...");
@@ -307,7 +275,7 @@ impl Client {
                 self.send_packet(stream_id, accept).await?;
             }
 
-            packet::Data::BlockInfo(info) => match self.incoming.transfers.get(&info.id) {
+            packet::Data::BlockInfo(info) => match self.incoming.get(&info.id) {
                 Some(incoming) => {
                     incoming
                         .send(incoming::IncomingPacket::Data(
@@ -322,7 +290,7 @@ impl Client {
                 }
             },
 
-            packet::Data::EndRound(end) => match self.incoming.transfers.get(&end.id) {
+            packet::Data::EndRound(end) => match self.incoming.get(&end.id) {
                 None => {
                     panic!("Could not find transfer")
                 }
@@ -350,11 +318,11 @@ impl Client {
                     file,
                     BLOCK_SIZE,
                     PIECE_SIZE,
-                    self.outgoing.tx.clone(),
+                    self.out_tx.clone(),
                     rx,
                 );
 
-                self.outgoing.transfers.insert(download.id.clone(), tx);
+                self.outgoing.insert(download.id.clone(), tx);
                 tokio::spawn(async move {
                     let start = Instant::now();
                     println!("Starting download...");
@@ -372,7 +340,7 @@ impl Client {
                 self.send_packet(stream_id, accept).await?;
             }
 
-            packet::Data::ControlUpdate(update) => match self.outgoing.transfers.get(&update.id) {
+            packet::Data::ControlUpdate(update) => match self.outgoing.get(&update.id) {
                 Some(outgoing) => {
                     outgoing
                         .send(outgoing::IncomingPacket::ControlUpdate(update))
@@ -383,7 +351,7 @@ impl Client {
                 None => panic!("Could not find transfer"),
             },
 
-            packet::Data::AckEndRound(ack) => match self.outgoing.transfers.get(&ack.id) {
+            packet::Data::AckEndRound(ack) => match self.outgoing.get(&ack.id) {
                 Some(outgoing) => {
                     outgoing
                         .send(outgoing::IncomingPacket::AckEndRound(ack))
@@ -432,7 +400,7 @@ impl Client {
             }
 
             datagram::Data::SendPiece(piece) => {
-                if let Some(incoming) = self.incoming.transfers.get(&piece.id) {
+                if let Some(incoming) = self.incoming.get(&piece.id) {
                     // No need to do anything if this fails, just drop the piece silently
                     let _ = incoming.try_send(incoming::IncomingPacket::Data(
                         incoming::IncomingData::Piece(piece),

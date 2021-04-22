@@ -2,7 +2,7 @@
 
 use crate::minmax::Minmax;
 use crate::proto;
-use crate::proto::AckEndRound;
+use crate::proto::{packet, AckEndRound, OutgoingData, Packet};
 use bitvec::vec::BitVec;
 use ring::digest;
 use std::collections::{HashMap, HashSet};
@@ -31,7 +31,7 @@ pub struct Incoming {
     /// Size of each piece in bytes
     piece_size: u32,
     rx: Receiver<IncomingPacket>,
-    tx: Sender<OutgoingPacket>,
+    tx: Sender<OutgoingData>,
     blocks_received: u64,
     highest_piece: u64,
     pieces_received: BitVec,
@@ -62,7 +62,7 @@ impl Incoming {
     pub fn new(
         id: Vec<u8>,
         rx: Receiver<IncomingPacket>,
-        tx: Sender<OutgoingPacket>,
+        tx: Sender<OutgoingData>,
         file: File,
         file_size: u64,
         block_size: u32,
@@ -270,7 +270,9 @@ impl Incoming {
         );
 
         self.tx
-            .send(OutgoingPacket::ControlUpdate(update))
+            .send(OutgoingData::Stream(Packet::new(
+                packet::Data::ControlUpdate(update),
+            )))
             .await
             .unwrap();
 
@@ -312,13 +314,12 @@ impl Incoming {
 
         println!("Starting next round");
 
-        self.tx
-            .send(OutgoingPacket::AckEndRound(AckEndRound {
-                id: self.id.clone(),
-                round,
-            }))
-            .await
-            .unwrap();
+        let ack = Packet::new(packet::Data::AckEndRound(AckEndRound {
+            id: self.id.clone(),
+            round,
+        }));
+
+        self.tx.send(OutgoingData::Stream(ack)).await.unwrap();
     }
 }
 
@@ -415,12 +416,6 @@ pub enum IncomingData {
     Piece(proto::SendPiece),
     /// Incoming information for a block.
     BlockInfo(proto::BlockInfo),
-}
-
-#[derive(Debug)]
-pub enum OutgoingPacket {
-    ControlUpdate(proto::ControlUpdate),
-    AckEndRound(proto::AckEndRound),
 }
 
 #[derive(Copy, Clone)]

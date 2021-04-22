@@ -9,7 +9,8 @@ use tokio::io::{AsyncReadExt, AsyncSeekExt, SeekFrom};
 use tokio::sync::mpsc::{Receiver, Sender};
 
 use crate::proto::{
-    datagram, packet, AckEndRound, BlockInfo, ControlUpdate, Datagram, EndRound, Packet, SendPiece,
+    datagram, packet, AckEndRound, BlockInfo, ControlUpdate, Datagram, EndRound, OutgoingData,
+    Packet, SendPiece,
 };
 
 const INITIAL_WINDOW_SIZE: u64 = 4;
@@ -25,7 +26,7 @@ struct Inner {
     file: File,
     piece_size: u32,
     block_size: u64,
-    tx: Sender<OutgoingPacket>,
+    tx: Sender<OutgoingData>,
     ctx: digest::Context,
     lost: BinaryHeap<Reverse<u64>>,
     round: Round,
@@ -41,7 +42,7 @@ impl Outgoing {
         file: File,
         block_size: u32,
         piece_size: u32,
-        tx: Sender<OutgoingPacket>,
+        tx: Sender<OutgoingData>,
         rx: Receiver<IncomingPacket>,
     ) -> Self {
         Outgoing {
@@ -162,7 +163,7 @@ impl Inner {
             piece: piece_num,
             data: buf,
         }));
-        self.tx.send(OutgoingPacket::Datagram(piece)).await.unwrap();
+        self.tx.send(OutgoingData::Datagram(piece)).await.unwrap();
         self.pieces_in_flight += 1;
 
         if let Round::First { .. } = self.round {
@@ -183,13 +184,13 @@ impl Inner {
             block,
             checksum: Vec::from(checksum.as_ref()),
         }));
-        self.tx.send(OutgoingPacket::Stream(info)).await.unwrap();
+        self.tx.send(OutgoingData::Stream(info)).await.unwrap();
     }
 
     async fn end_round(&mut self) {
         println!("Ending round {}", self.round.num());
         self.tx
-            .send(OutgoingPacket::Stream(Packet::new(packet::Data::EndRound(
+            .send(OutgoingData::Stream(Packet::new(packet::Data::EndRound(
                 EndRound {
                     id: self.id.clone(),
                     round: self.round.num(),
@@ -243,15 +244,6 @@ impl Inner {
 
         false
     }
-}
-
-/// A packet sent by an outgoing file transfer.
-#[derive(Debug)]
-pub enum OutgoingPacket {
-    /// Outgoing stream packet.
-    Stream(Packet),
-    /// Outgoing datagram.
-    Datagram(Datagram),
 }
 
 #[derive(Debug)]

@@ -25,6 +25,12 @@ impl Datagram {
     }
 }
 
+#[derive(Debug)]
+pub enum OutgoingData {
+    Stream(Packet),
+    Datagram(Datagram),
+}
+
 impl From<IpAddr> for IpAddress {
     fn from(addr: IpAddr) -> IpAddress {
         match addr {
