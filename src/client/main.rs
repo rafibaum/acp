@@ -62,6 +62,7 @@ async fn main() -> Result<()> {
 
     let conn = quiche::connect(None, &scid, &mut config).unwrap();
 
+    //TODO: Adjust buffer sizes
     let (tx, rx) = mpsc::channel(32);
     let client = Client::new(conn, sock, rx, rng);
 
@@ -352,10 +353,6 @@ impl Inner {
 
             while !to_send.is_empty() {
                 let sent = self.socket.send(&to_send).await.unwrap();
-                //TODO: Ensure progress is made
-                if sent == 0 {
-                    panic!("Nothing sent");
-                }
                 to_send = &to_send[sent..];
             }
         }
@@ -401,7 +398,6 @@ impl Inner {
         buf.resize(len + BUFFER_BUMP, 0);
 
         while let Ok((read, _fin)) = self.connection.stream_recv(stream_id, &mut buf[len..]) {
-            //TODO: Handle fin
             len += read;
             buf.resize(len + BUFFER_BUMP, 0);
         }

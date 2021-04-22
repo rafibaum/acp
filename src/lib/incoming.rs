@@ -30,7 +30,6 @@ pub struct Incoming {
     block_size: u32,
     /// Size of each piece in bytes
     piece_size: u32,
-    //TODO: Add reasonable buffer sizes
     rx: Receiver<IncomingPacket>,
     tx: Sender<OutgoingPacket>,
     blocks_received: u64,
@@ -172,7 +171,6 @@ impl Incoming {
 
         // Get block or insert empty block information
         //TODO: Handle OOB pieces
-        //TODO: Better closure capture semantics, move inline
         let block = block(
             &mut self.blocks,
             block_num,
