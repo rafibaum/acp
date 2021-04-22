@@ -14,7 +14,7 @@ use crate::proto::{
 };
 use futures::FutureExt;
 
-const INITIAL_WINDOW_SIZE: u64 = 4;
+const INITIAL_WINDOW_SIZE: u64 = 2;
 
 /// Type for managing information relating to an outgoing file transfer.
 pub struct Outgoing {
@@ -34,6 +34,7 @@ struct Inner {
     round_stall: bool,
     pieces_in_flight: u64,
     window_size: u64,
+    target_window: u64,
 }
 
 impl Outgoing {
@@ -59,6 +60,7 @@ impl Outgoing {
                 round_stall: false,
                 pieces_in_flight: 0,
                 window_size: INITIAL_WINDOW_SIZE,
+                target_window: INITIAL_WINDOW_SIZE,
             },
             rx,
         }
@@ -223,7 +225,11 @@ impl Inner {
                     .pieces_in_flight
                     .saturating_sub(update.lost.len() as u64);
 
-                self.window_size = update.window_size;
+                self.target_window = update.window_size;
+                self.window_size = std::cmp::min(
+                    self.target_window,
+                    self.window_size + update.received as u64,
+                );
 
                 self.lost.extend(update.lost.into_iter().map(Reverse));
             }
