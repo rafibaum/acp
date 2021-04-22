@@ -177,8 +177,7 @@ impl Client {
             self.inner.send().await;
 
             if self.inner.connection.is_closed() {
-                //TODO: Handle
-                panic!("Connection was closed before it got established");
+                println!("Could not establish connection");
             }
 
             if self.inner.connection.is_established() && !self.inner.connection.is_draining() {
