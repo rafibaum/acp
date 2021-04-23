@@ -12,6 +12,7 @@ use crate::proto::{
     datagram, packet, AckEndRound, BlockInfo, ControlUpdate, Datagram, EndRound, OutgoingData,
     Packet, SendPiece,
 };
+use crate::Terminated;
 use futures::FutureExt;
 
 const INITIAL_WINDOW_SIZE: u64 = 2;
@@ -20,6 +21,7 @@ const INITIAL_WINDOW_SIZE: u64 = 2;
 pub struct Outgoing {
     inner: Inner,
     rx: Receiver<IncomingPacket>,
+    term_tx: Sender<Terminated>,
 }
 
 struct Inner {
@@ -46,6 +48,7 @@ impl Outgoing {
         piece_size: u32,
         tx: Sender<OutgoingData>,
         rx: Receiver<IncomingPacket>,
+        term_tx: Sender<Terminated>,
     ) -> Self {
         Outgoing {
             inner: Inner {
@@ -63,6 +66,7 @@ impl Outgoing {
                 target_window: INITIAL_WINDOW_SIZE,
             },
             rx,
+            term_tx,
         }
     }
 
@@ -84,6 +88,10 @@ impl Outgoing {
         }
 
         println!("Lost: {:?}", self.inner.lost);
+        self.term_tx
+            .send(Terminated::Outgoing(self.inner.id))
+            .await
+            .unwrap();
     }
 
     async fn await_update(&mut self) -> bool {

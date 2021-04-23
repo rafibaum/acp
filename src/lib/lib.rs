@@ -34,3 +34,13 @@ impl Display for AcpError {
         }
     }
 }
+
+/// Signal that a transfer has terminated. Used to indicate to the parent transfer that any
+/// handles should be cleaned up.
+#[derive(Debug)]
+pub enum Terminated {
+    /// Terminated incoming transfer
+    Incoming(Vec<u8>),
+    /// Terminated outgoing transfer
+    Outgoing(Vec<u8>),
+}

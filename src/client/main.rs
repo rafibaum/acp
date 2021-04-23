@@ -11,8 +11,8 @@ use libacp::outgoing::Outgoing;
 use libacp::proto::packet::Data;
 use libacp::proto::{datagram, AcceptDownload, OutgoingData, RequestDownload};
 use libacp::proto::{Datagram, Packet, RequestUpload};
-use libacp::Minmax;
 use libacp::{incoming, outgoing, proto};
+use libacp::{Minmax, Terminated};
 use prost::Message;
 use quiche::{CongestionControlAlgorithm, Connection, ConnectionId};
 use ring::rand::{SecureRandom, SystemRandom};
@@ -85,6 +85,7 @@ struct Client {
     inner: Inner,
     out_rx: Receiver<OutgoingData>,
     stream_bufs: HashMap<u64, BytesMut>,
+    term_rx: Receiver<Terminated>,
 }
 
 struct Inner {
@@ -100,6 +101,7 @@ struct Inner {
     dgram_buf: BytesMut,
     rtt_min: Arc<AtomicU64>,
     rtt_filter: Minmax<Instant, u64>,
+    term_tx: Sender<Terminated>,
 }
 
 struct OutgoingTransfers {
@@ -136,6 +138,8 @@ impl Client {
 
         let (out_tx, out_rx) = mpsc::channel(32);
 
+        let (term_tx, term_rx) = mpsc::channel(32);
+
         let rtt = connection.stats().rtt.as_nanos() as u64;
 
         Client {
@@ -158,9 +162,11 @@ impl Client {
                 dgram_buf,
                 rtt_min: Arc::new(AtomicU64::new(rtt)),
                 rtt_filter: Minmax::new(Instant::now(), rtt),
+                term_tx,
             },
             stream_bufs: HashMap::new(),
             out_rx,
+            term_rx,
         }
     }
 
@@ -202,10 +208,11 @@ impl Client {
                     self.inner.send_packet(0, packet).await;
 
                     let out_tx = self.inner.out_tx.clone();
+                    let term_tx = self.inner.term_tx.clone();
 
                     tokio::spawn(async {
                         let in_rx = start_rx.await.unwrap();
-                        let outgoing = Outgoing::new(id, file, 200, 16000, out_tx, in_rx);
+                        let outgoing = Outgoing::new(id, file, 200, 16000, out_tx, in_rx, term_tx);
                         outgoing.run().await
                     })
                 }
@@ -233,6 +240,7 @@ impl Client {
 
                     let in_tx = self.inner.out_tx.clone();
                     let rtt_min = self.inner.rtt_min.clone();
+                    let term_tx = self.inner.term_tx.clone();
 
                     tokio::spawn(async {
                         let start = start_rx.await.unwrap();
@@ -245,6 +253,7 @@ impl Client {
                             start.info.block_size,
                             start.info.piece_size,
                             rtt_min,
+                            term_tx,
                         );
                         incoming.run().await
                     })
@@ -282,6 +291,19 @@ impl Client {
                         match to_send {
                             OutgoingData::Stream(packet) => self.inner.send_packet(0, packet).await,
                             OutgoingData::Datagram(datagram) => self.inner.send_datagram(datagram).await,
+                        }
+                    }
+
+                    // Cleanup
+                    Some(termination) = self.term_rx.recv() => {
+                        match termination {
+                            Terminated::Incoming(id) => {
+                                self.inner.incoming.transfers.remove(&id);
+                            }
+
+                            Terminated::Outgoing(id) => {
+                                self.inner.outgoing.transfers.remove(&id);
+                            }
                         }
                     }
                 }

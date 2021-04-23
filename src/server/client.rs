@@ -3,9 +3,9 @@ use anyhow::{Context, Result};
 use bytes::{Buf, BytesMut};
 use libacp::proto::{datagram, packet, AcceptDownload, AcceptUpload, OutgoingData, StartBenchmark};
 use libacp::proto::{Datagram, Packet, Ping};
-use libacp::Minmax;
 use libacp::{incoming, outgoing};
 use libacp::{proto, AcpError};
+use libacp::{Minmax, Terminated};
 use prost::Message;
 use quiche::ConnectionId;
 use std::collections::HashMap;
@@ -29,16 +29,17 @@ pub struct Client {
     connection: Pin<Box<quiche::Connection>>,
     rx: Receiver<BytesMut>,
     scid: ConnectionId<'static>,
-    term_tx: Sender<ConnectionId<'static>>,
+    parent_term: Sender<ConnectionId<'static>>,
     send_buf: BytesMut,
     dgram_buf: BytesMut,
     stream_bufs: HashMap<u64, BytesMut>,
     state: ClientState,
-    //TODO: Handle terminated transfers
     incoming: HashMap<Vec<u8>, Sender<incoming::IncomingPacket>>,
     outgoing: HashMap<Vec<u8>, Sender<outgoing::IncomingPacket>>,
     out_tx: Sender<OutgoingData>,
     out_rx: Receiver<OutgoingData>,
+    term_tx: Sender<Terminated>,
+    term_rx: Receiver<Terminated>,
     rtt_filter: Minmax<Instant, u64>,
     rtt_min: Arc<AtomicU64>,
 }
@@ -50,7 +51,7 @@ impl Client {
         connection: Pin<Box<quiche::Connection>>,
         rx: Receiver<BytesMut>,
         scid: ConnectionId<'static>,
-        term_tx: Sender<ConnectionId<'static>>,
+        parent_term: Sender<ConnectionId<'static>>,
     ) -> Self {
         let mut send_buf = BytesMut::with_capacity(router::DATAGRAM_SIZE);
         send_buf.resize(router::DATAGRAM_SIZE, 0);
@@ -59,6 +60,8 @@ impl Client {
         dgram_buf.resize(router::DATAGRAM_SIZE, 0);
 
         let (out_tx, out_rx) = mpsc::channel(32);
+
+        let (term_tx, term_rx) = mpsc::channel(32);
 
         let rtt_min = connection.stats().rtt.as_nanos() as u64;
 
@@ -70,7 +73,7 @@ impl Client {
             dgram_buf,
             rx,
             scid,
-            term_tx,
+            parent_term,
             stream_bufs: HashMap::new(),
             state: ClientState::Connected,
             incoming: HashMap::new(),
@@ -79,6 +82,8 @@ impl Client {
             out_rx,
             rtt_min: Arc::new(AtomicU64::new(rtt_min)),
             rtt_filter: Minmax::new(Instant::now(), rtt_min),
+            term_tx,
+            term_rx,
         }
     }
 
@@ -96,6 +101,7 @@ impl Client {
                     }
                 }
 
+                // Send outgoing data
                 Some(data) = {
                     self.out_rx.recv()
                 } => {
@@ -106,6 +112,19 @@ impl Client {
 
                         OutgoingData::Datagram(datagram) => {
                             self.send_datagram(datagram).await?;
+                        }
+                    }
+                }
+
+                // Handle cleanup
+                Some(termination) = self.term_rx.recv() => {
+                    match termination {
+                        Terminated::Outgoing(id) => {
+                            self.outgoing.remove(&id);
+                        }
+
+                        Terminated::Incoming(id) => {
+                            self.incoming.remove(&id);
                         }
                     }
                 }
@@ -134,7 +153,7 @@ impl Client {
             }
         }
 
-        if let Err(e) = self.term_tx.send(self.scid).await {
+        if let Err(e) = self.parent_term.send(self.scid).await {
             error!("client termination channel dropped");
             return Err(e).context("client termination channel dropped");
         }
@@ -262,6 +281,7 @@ impl Client {
                     info.block_size,
                     info.piece_size,
                     self.rtt_min.clone(),
+                    self.term_tx.clone(),
                 );
 
                 self.incoming.insert(info.id.clone(), tx);
@@ -322,6 +342,7 @@ impl Client {
                     PIECE_SIZE,
                     self.out_tx.clone(),
                     rx,
+                    self.term_tx.clone(),
                 );
 
                 self.outgoing.insert(download.id.clone(), tx);

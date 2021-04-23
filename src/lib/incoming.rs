@@ -1,8 +1,8 @@
 //! Types for handling incoming file transfers.
 
 use crate::minmax::Minmax;
-use crate::proto;
 use crate::proto::{packet, AckEndRound, OutgoingData, Packet};
+use crate::{proto, Terminated};
 use bitvec::vec::BitVec;
 use ring::digest;
 use std::collections::{HashMap, HashSet};
@@ -45,6 +45,7 @@ pub struct Incoming {
     piece_min: Duration,
     piece_filter: Minmax<Instant, Duration>,
     rtt: Arc<AtomicU64>,
+    term_tx: Sender<Terminated>,
 }
 
 struct BlockInfo {
@@ -68,6 +69,7 @@ impl Incoming {
         block_size: u32,
         piece_size: u32,
         rtt: Arc<AtomicU64>,
+        term_tx: Sender<Terminated>,
     ) -> Self {
         let blocks_cap = (file_size / piece_size as u64 + 1) / block_size as u64 + 1;
         let pieces_cap = file_size / piece_size as u64 + 1;
@@ -98,6 +100,7 @@ impl Incoming {
             piece_min: INITIAL_AVG_PIECE_TIME,
             piece_filter: Minmax::new(Instant::now(), INITIAL_AVG_PIECE_TIME),
             rtt,
+            term_tx,
         }
     }
 
@@ -149,6 +152,11 @@ impl Incoming {
                 }
             }
         }
+
+        self.term_tx
+            .send(Terminated::Incoming(self.id))
+            .await
+            .unwrap();
     }
 
     fn schedule_gc(&mut self) {
