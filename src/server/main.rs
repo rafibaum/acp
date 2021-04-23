@@ -15,8 +15,6 @@ use thiserror::Error;
 /// Server's main function. Starts the router and manages top-level error handling.
 #[tokio::main]
 async fn main() -> Result<()> {
-    tracing_subscriber::fmt::init();
-
     let mut config = quiche::Config::new(quiche::PROTOCOL_VERSION).unwrap();
     config.set_application_protos(b"\x07acp/0.1").unwrap();
     config

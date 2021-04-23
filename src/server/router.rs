@@ -9,7 +9,6 @@ use std::sync::Arc;
 use tokio::net::{ToSocketAddrs, UdpSocket};
 use tokio::sync::mpsc::error::TrySendError;
 use tokio::sync::mpsc::{channel, Receiver, Sender};
-use tracing::{debug, error, info, trace, trace_span, Instrument};
 
 pub const DATAGRAM_SIZE: usize = u16::MAX as usize;
 
@@ -46,7 +45,6 @@ impl Router {
         })
     }
 
-    #[tracing::instrument(level = "trace", skip(self))]
     pub async fn run(mut self) -> Result<()> {
         let mut recv_buf = BytesMut::new();
         recv_buf.resize(DATAGRAM_SIZE, 0);
@@ -59,14 +57,12 @@ impl Router {
                 }
 
                 Some(cid) = self.term_rx.recv() => {
-                    trace!(?cid, "purging client");
                     self.handles.remove(&cid);
                 }
             }
         }
     }
 
-    #[tracing::instrument(level = "trace", skip(self, recv_buf))]
     async fn socket_data(
         &mut self,
         len: usize,
@@ -77,7 +73,6 @@ impl Router {
         {
             Ok(header) => header,
             Err(_) => {
-                debug!("received packet without QUIC header");
                 return Ok(());
             }
         };
@@ -90,10 +85,7 @@ impl Router {
         if let Err(err) = match self.handles.get(&header.dcid) {
             Some(handle) => {
                 match handle.tx.try_send(buf) {
-                    Ok(()) => {
-                        trace!(size = len, "datagram passed to client handle");
-                        Ok(())
-                    }
+                    Ok(()) => Ok(()),
                     Err(TrySendError::Closed(buf)) => {
                         // Client dropped, run a handshake instead
                         self.handshake(addr, &header, buf)
@@ -105,9 +97,7 @@ impl Router {
                 }
             }
             None => self.handshake(addr, &header, buf),
-        } {
-            error!(?err, "handshake failed");
-        }
+        } {}
 
         Ok(())
     }
@@ -118,11 +108,7 @@ impl Router {
         header: &quiche::Header,
         buf: BytesMut,
     ) -> Result<()> {
-        let span = trace_span!("handshake", ty = ?header.ty, version = header.version, scid = ?header.scid.as_ref());
-        let _enter = span.enter();
-
         if header.ty != quiche::Type::Initial {
-            debug!("received non-initial packet for handshake");
             return Ok(());
         }
 
@@ -148,15 +134,11 @@ impl Router {
         );
 
         tokio::spawn(async move {
-            let span = trace_span!("client");
             async move {
-                info!("starting client");
                 if let Err(e) = client.run().await {
                     eprintln!("Client error: {}", e);
                 }
-                debug!("terminating client");
             }
-            .instrument(span)
             .await
         });
 
