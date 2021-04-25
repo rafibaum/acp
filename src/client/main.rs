@@ -25,6 +25,7 @@ use std::time::{Duration, Instant};
 use tokio::fs::{File, OpenOptions};
 use tokio::net::UdpSocket;
 use tokio::sync::mpsc;
+use tokio::sync::mpsc::error::TrySendError;
 use tokio::sync::mpsc::{Receiver, Sender};
 use tokio::sync::oneshot;
 
@@ -501,12 +502,11 @@ impl Inner {
         match data {
             datagram::Data::SendPiece(piece) => {
                 let transfer = self.incoming.transfers.get_mut(&piece.id).unwrap();
-                transfer
-                    .send(incoming::IncomingPacket::Data(
-                        incoming::IncomingData::Piece(piece),
-                    ))
-                    .await
-                    .unwrap();
+                if let Err(TrySendError::Closed(_)) = transfer.try_send(
+                    incoming::IncomingPacket::Data(incoming::IncomingData::Piece(piece)),
+                ) {
+                    panic!("Transfer closed!");
+                }
             }
 
             datagram::Data::BenchmarkPayload(_) => unimplemented!(),
