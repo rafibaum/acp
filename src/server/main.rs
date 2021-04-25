@@ -25,8 +25,8 @@ async fn main() -> Result<()> {
     config
         .load_priv_key_from_pem_file("cert.key")
         .context("Failed to load TLS private key")?;
-    config.set_max_recv_udp_payload_size(65535);
-    config.set_max_send_udp_payload_size(65535);
+    config.set_max_recv_udp_payload_size(8192);
+    config.set_max_send_udp_payload_size(8192);
     config.set_initial_max_data(1000000);
     config.set_initial_max_streams_bidi(1);
     config.set_initial_max_streams_uni(1);
