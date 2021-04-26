@@ -10,8 +10,8 @@ use tokio::sync::mpsc::{Receiver, Sender};
 use tracing::{instrument, trace};
 
 use crate::proto::{
-    datagram, packet, AckEndRound, BlockInfo, ControlUpdate, Datagram, EndRound, OutgoingData,
-    Packet, SendPiece,
+    datagram, packet, AckEndRound, BlockInfo, ControlUpdate, Datagram, EndRound, EndTransfer,
+    OutgoingData, Packet, SendPiece,
 };
 use crate::Terminated;
 use futures::FutureExt;
@@ -291,6 +291,11 @@ impl Inner {
 
                 self.round_stall = false;
             }
+
+            IncomingPacket::EndTransfer(_) => {
+                trace!("Ending transfer");
+                return true;
+            }
         }
 
         false
@@ -304,6 +309,8 @@ pub enum IncomingPacket {
     ControlUpdate(ControlUpdate),
     /// The receiver is ready to start the next round.
     AckEndRound(AckEndRound),
+    /// The receiver has terminated the transfer.
+    EndTransfer(EndTransfer),
 }
 
 enum Round {

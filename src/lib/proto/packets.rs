@@ -1,6 +1,9 @@
 #[derive(Clone, PartialEq, ::prost::Message)]
 pub struct Packet {
-    #[prost(oneof = "packet::Data", tags = "1, 2, 3, 4, 6, 7, 8, 9, 10, 11, 12")]
+    #[prost(
+        oneof = "packet::Data",
+        tags = "1, 2, 3, 4, 6, 7, 8, 9, 10, 11, 12, 13"
+    )]
     pub data: ::core::option::Option<packet::Data>,
 }
 /// Nested message and enum types in `Packet`.
@@ -29,6 +32,8 @@ pub mod packet {
         RequestDownload(super::RequestDownload),
         #[prost(message, tag = "12")]
         AcceptDownload(super::AcceptDownload),
+        #[prost(message, tag = "13")]
+        EndTransfer(super::EndTransfer),
     }
 }
 #[derive(Clone, PartialEq, ::prost::Message)]
@@ -139,6 +144,11 @@ pub struct AckEndRound {
     pub id: ::prost::alloc::vec::Vec<u8>,
     #[prost(uint32, tag = "2")]
     pub round: u32,
+}
+#[derive(Clone, PartialEq, ::prost::Message)]
+pub struct EndTransfer {
+    #[prost(bytes = "vec", tag = "1")]
+    pub id: ::prost::alloc::vec::Vec<u8>,
 }
 #[derive(Clone, PartialEq, ::prost::Message)]
 pub struct BenchmarkPayload {

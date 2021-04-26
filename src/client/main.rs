@@ -495,6 +495,14 @@ impl Inner {
                     .unwrap();
             }
 
+            Data::EndTransfer(end) => {
+                let transfer = self.outgoing.transfers.get_mut(&end.id).unwrap();
+                transfer
+                    .send(outgoing::IncomingPacket::EndTransfer(end))
+                    .await
+                    .unwrap()
+            }
+
             Data::Ping(_) => unimplemented!(),
             Data::StartBenchmark(_) => unimplemented!(),
             Data::StopBenchmark(_) => unimplemented!(),

@@ -371,6 +371,17 @@ impl Client {
                 None => panic!("Could not find transfer"),
             },
 
+            packet::Data::EndTransfer(end) => match self.outgoing.get(&end.id) {
+                Some(outgoing) => {
+                    outgoing
+                        .send(outgoing::IncomingPacket::EndTransfer(end))
+                        .await
+                        .unwrap();
+                }
+
+                None => panic!("Could not find transfer"),
+            },
+
             packet::Data::AcceptUpload(_) => unimplemented!(),
             packet::Data::AcceptDownload(_) => unimplemented!(),
         }

@@ -15,6 +15,7 @@ message Packet {
     AckEndRound ackEndRound = 10;
     RequestDownload requestDownload = 11;
     AcceptDownload acceptDownload = 12;
+    EndTransfer endTransfer = 13;
   }
 }
 
@@ -88,6 +89,10 @@ message EndRound {
 message AckEndRound {
   bytes id = 1;
   uint32 round = 2;
+}
+
+message EndTransfer {
+  bytes id = 1;
 }
 
 message BenchmarkPayload {

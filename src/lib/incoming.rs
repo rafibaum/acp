@@ -1,7 +1,7 @@
 //! Types for handling incoming file transfers.
 
 use crate::minmax::Minmax;
-use crate::proto::{packet, AckEndRound, OutgoingData, Packet};
+use crate::proto::{packet, AckEndRound, EndTransfer, OutgoingData, Packet};
 use crate::{proto, Terminated};
 use bitvec::vec::BitVec;
 use ring::digest;
@@ -239,6 +239,14 @@ impl Incoming {
                 );
 
                 if self.blocks_received >= self.num_blocks {
+                    self.tx
+                        .send(OutgoingData::Stream(Packet::new(
+                            packet::Data::EndTransfer(EndTransfer {
+                                id: self.id.clone(),
+                            }),
+                        )))
+                        .await
+                        .unwrap();
                     return true;
                 }
             } else {
