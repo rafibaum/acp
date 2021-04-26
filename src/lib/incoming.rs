@@ -13,7 +13,6 @@ use tokio::fs::File;
 use tokio::io::{AsyncReadExt, AsyncSeekExt, AsyncWriteExt, SeekFrom};
 use tokio::sync::mpsc::{Receiver, Sender};
 use tokio::time::Instant;
-use tracing::{instrument, trace};
 
 const INITIAL_AVG_PIECE_TIME: Duration = Duration::from_millis(1);
 const PIECE_WINDOW: Duration = Duration::from_secs(10);
@@ -106,7 +105,6 @@ impl Incoming {
     }
 
     /// Starts an incoming file transfer.
-    #[instrument(name = "incoming", level = "trace", skip(self), fields(id = ?self.id))]
     pub async fn run(mut self) {
         loop {
             // Splitting borrows
@@ -126,7 +124,7 @@ impl Incoming {
                                 }
 
                                 IncomingPacket::EndRound(end) => {
-                                    trace!(round = end.round, "Ending round");
+                                    println!("Ending round {}", end.round);
                                     let gc_interval = Duration::from_nanos(self.rtt.load(Ordering::Relaxed) / GC_INTERVAL);
                                     self.next_gc = Some(Instant::now() + gc_interval);
                                     self.draining_round = Some(DrainState::Draining(end.round));
@@ -207,9 +205,11 @@ impl Incoming {
                     self.piece_relief += 1;
                 }
 
-                trace!(piece = piece.piece, "Received piece");
-
                 let offset = piece.piece * self.piece_size as u64;
+                if piece.piece % 100 == 0 {
+                    println!("Received piece {}", piece.piece);
+                }
+
                 let block_status = block.write_piece(&mut self.file, offset, &piece.data).await;
 
                 let elapsed = Instant::now() - self.piece_start.unwrap();
@@ -231,11 +231,9 @@ impl Incoming {
                 .await
             {
                 self.blocks_received += 1;
-                trace!(
-                    block_num,
-                    blocks_received = self.blocks_received,
-                    total_blocks = self.num_blocks,
-                    "Completed block"
+                println!(
+                    "Verified block {}, done {} of {}",
+                    block.num, self.blocks_received, self.num_blocks
                 );
 
                 if self.blocks_received >= self.num_blocks {
@@ -278,21 +276,19 @@ impl Incoming {
         // Build in a queue of double and assume minimum piece time is half of regular time
         window_size *= 4;
 
-        trace!(
-            received = self.piece_relief,
-            lost = newly_lost.len(),
-            target_window = window_size,
-            rtt,
-            piece_min = self.piece_min.as_nanos() as u64,
-            "GC ran"
-        );
-
         let update = proto::ControlUpdate {
             id: self.id.clone(),
             received: self.piece_relief,
             lost: newly_lost,
             window_size,
         };
+
+        println!(
+            "Update, received: {}, lost: {}, window: {}",
+            update.received,
+            self.lost.len(),
+            window_size
+        );
 
         self.tx
             .send(OutgoingData::Stream(Packet::new(
@@ -337,7 +333,7 @@ impl Incoming {
         self.lost.clear();
         self.draining_round = None;
 
-        trace!(round, "Ending round");
+        println!("Starting next round");
 
         let ack = Packet::new(packet::Data::AckEndRound(AckEndRound {
             id: self.id.clone(),

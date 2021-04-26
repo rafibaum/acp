@@ -17,7 +17,6 @@ use prost::Message;
 use quiche::{CongestionControlAlgorithm, Connection, ConnectionId};
 use ring::rand::{SecureRandom, SystemRandom};
 use std::collections::HashMap;
-use std::fmt::{Display, Formatter};
 use std::pin::Pin;
 use std::sync::atomic::AtomicU64;
 use std::sync::atomic::Ordering;
@@ -29,7 +28,6 @@ use tokio::sync::mpsc;
 use tokio::sync::mpsc::error::TrySendError;
 use tokio::sync::mpsc::{Receiver, Sender};
 use tokio::sync::oneshot;
-use tracing::{error, info, span, trace, Instrument, Level};
 
 const RTT_WINDOW: Duration = Duration::from_secs(10);
 
@@ -181,8 +179,7 @@ impl Client {
             self.inner.send().await;
 
             if self.inner.connection.is_closed() {
-                error!("Could not establish connection");
-                return;
+                println!("Could not establish connection");
             }
 
             if self.inner.connection.is_established() && !self.inner.connection.is_draining() {
@@ -190,19 +187,132 @@ impl Client {
             }
         }
 
-        trace!("Connection established");
-
         // Initialised, start processing commands
         while let Some(command) = self.inner.commands.recv().await {
-            let span = span!(Level::TRACE, "command", %command);
-            self.process_command(command).instrument(span).await;
-        }
+            let handle = match command {
+                Command::PutFile { local, remote } => {
+                    let file = File::open(local).await.expect("File not found");
 
-        trace!("Done procesing commands");
+                    let mut id = vec![0; 16];
+                    self.inner.rng.fill(&mut id).unwrap();
+
+                    let (start_tx, start_rx) = oneshot::channel();
+                    self.inner.outgoing.pending.insert(id.clone(), start_tx);
+
+                    let packet = Packet::new(Data::RequestUpload(RequestUpload {
+                        id: id.clone(),
+                        filename: remote.into_bytes(),
+                        size: file.metadata().await.unwrap().len(),
+                        block_size: 800,
+                        piece_size: 4000,
+                    }));
+                    self.inner.send_packet(0, packet).await;
+
+                    let out_tx = self.inner.out_tx.clone();
+                    let term_tx = self.inner.term_tx.clone();
+
+                    tokio::spawn(async {
+                        let in_rx = start_rx.await.unwrap();
+                        let outgoing = Outgoing::new(id, file, 800, 4000, out_tx, in_rx, term_tx);
+                        outgoing.run().await
+                    })
+                }
+
+                Command::GetFile { local, remote } => {
+                    let file = OpenOptions::new()
+                        .read(true)
+                        .write(true)
+                        .create(true)
+                        .open(local)
+                        .await
+                        .unwrap();
+
+                    let mut id = vec![0; 16];
+                    self.inner.rng.fill(&mut id).unwrap();
+
+                    let (start_tx, start_rx) = oneshot::channel();
+                    self.inner.incoming.pending.insert(id.clone(), start_tx);
+
+                    let packet = Packet::new(Data::RequestDownload(RequestDownload {
+                        id: id.clone(),
+                        filename: remote.into_bytes(),
+                    }));
+                    self.inner.send_packet(0, packet).await;
+
+                    let in_tx = self.inner.out_tx.clone();
+                    let rtt_min = self.inner.rtt_min.clone();
+                    let term_tx = self.inner.term_tx.clone();
+
+                    tokio::spawn(async {
+                        let start = start_rx.await.unwrap();
+                        let incoming = Incoming::new(
+                            id,
+                            start.rx,
+                            in_tx,
+                            file,
+                            start.info.size,
+                            start.info.block_size,
+                            start.info.piece_size,
+                            rtt_min,
+                            term_tx,
+                        );
+                        incoming.run().await
+                    })
+                }
+            };
+
+            tokio::pin!(handle);
+
+            // Process network traffic until command finished
+            loop {
+                tokio::select! {
+                    // Command finished
+                    _ = &mut handle => break,
+
+                    // Incoming traffic
+                    _ = self.inner.recv() => {
+                        self.inner.send().await;
+
+                        if self.inner.connection.is_closed() || self.inner.connection.is_draining() {
+                            // Connection ending
+                            break;
+                        }
+
+                        let new_min = self.inner.rtt_filter.running_min(RTT_WINDOW, Instant::now(), self.inner.connection.stats().rtt.as_nanos() as u64);
+                        if new_min != self.inner.rtt_min.load(Ordering::Relaxed) {
+                            self.inner.rtt_min.store(new_min, Ordering::Relaxed);
+                        }
+
+                        self.read_streams().await;
+                        self.inner.read_dgrams().await;
+                    }
+
+                    // Outgoing traffic
+                    Some(to_send) = self.out_rx.recv() => {
+                        match to_send {
+                            OutgoingData::Stream(packet) => self.inner.send_packet(0, packet).await,
+                            OutgoingData::Datagram(datagram) => self.inner.send_datagram(datagram).await,
+                        }
+                    }
+
+                    // Cleanup
+                    Some(termination) = self.term_rx.recv() => {
+                        match termination {
+                            Terminated::Incoming(id) => {
+                                self.inner.incoming.transfers.remove(&id);
+                            }
+
+                            Terminated::Outgoing(id) => {
+                                self.inner.outgoing.transfers.remove(&id);
+                            }
+                        }
+                    }
+                }
+            }
+        }
 
         if !self.inner.connection.is_draining() && !self.inner.connection.is_closed() {
             // Commands finished, close connection
-            trace!("Closing connection");
             self.inner.connection.close(true, 0, b"Done").unwrap();
             self.inner.send().await;
         }
@@ -212,131 +322,8 @@ impl Client {
             self.inner.send().await;
 
             if self.inner.connection.is_closed() {
-                info!("Connection closed");
+                println!("Connection closed");
                 return;
-            }
-        }
-    }
-
-    async fn process_command(&mut self, command: Command) {
-        let handle = match command {
-            Command::PutFile { local, remote } => {
-                let file = File::open(local).await.expect("File not found");
-
-                let mut id = vec![0; 16];
-                self.inner.rng.fill(&mut id).unwrap();
-
-                let (start_tx, start_rx) = oneshot::channel();
-                self.inner.outgoing.pending.insert(id.clone(), start_tx);
-
-                let packet = Packet::new(Data::RequestUpload(RequestUpload {
-                    id: id.clone(),
-                    filename: remote.into_bytes(),
-                    size: file.metadata().await.unwrap().len(),
-                    block_size: 800,
-                    piece_size: 4000,
-                }));
-                self.inner.send_packet(0, packet).await;
-
-                let out_tx = self.inner.out_tx.clone();
-                let term_tx = self.inner.term_tx.clone();
-
-                tokio::spawn(async {
-                    let in_rx = start_rx.await.unwrap();
-                    let outgoing = Outgoing::new(id, file, 800, 4000, out_tx, in_rx, term_tx);
-                    outgoing.run().await
-                })
-            }
-
-            Command::GetFile { local, remote } => {
-                let file = OpenOptions::new()
-                    .read(true)
-                    .write(true)
-                    .create(true)
-                    .open(local)
-                    .await
-                    .unwrap();
-
-                let mut id = vec![0; 16];
-                self.inner.rng.fill(&mut id).unwrap();
-
-                let (start_tx, start_rx) = oneshot::channel();
-                self.inner.incoming.pending.insert(id.clone(), start_tx);
-
-                let packet = Packet::new(Data::RequestDownload(RequestDownload {
-                    id: id.clone(),
-                    filename: remote.into_bytes(),
-                }));
-                self.inner.send_packet(0, packet).await;
-
-                let in_tx = self.inner.out_tx.clone();
-                let rtt_min = self.inner.rtt_min.clone();
-                let term_tx = self.inner.term_tx.clone();
-
-                tokio::spawn(async {
-                    let start = start_rx.await.unwrap();
-                    let incoming = Incoming::new(
-                        id,
-                        start.rx,
-                        in_tx,
-                        file,
-                        start.info.size,
-                        start.info.block_size,
-                        start.info.piece_size,
-                        rtt_min,
-                        term_tx,
-                    );
-                    incoming.run().await
-                })
-            }
-        };
-
-        tokio::pin!(handle);
-
-        // Process network traffic until command finished
-        loop {
-            tokio::select! {
-                // Command finished
-                _ = &mut handle => break,
-
-                // Incoming traffic
-                _ = self.inner.recv() => {
-                    self.inner.send().await;
-
-                    if self.inner.connection.is_closed() || self.inner.connection.is_draining() {
-                        // Connection ending
-                        break;
-                    }
-
-                    let new_min = self.inner.rtt_filter.running_min(RTT_WINDOW, Instant::now(), self.inner.connection.stats().rtt.as_nanos() as u64);
-                    if new_min != self.inner.rtt_min.load(Ordering::Relaxed) {
-                        self.inner.rtt_min.store(new_min, Ordering::Relaxed);
-                    }
-
-                    self.read_streams().await;
-                    self.inner.read_dgrams().await;
-                }
-
-                // Outgoing traffic
-                Some(to_send) = self.out_rx.recv() => {
-                    match to_send {
-                        OutgoingData::Stream(packet) => self.inner.send_packet(0, packet).await,
-                        OutgoingData::Datagram(datagram) => self.inner.send_datagram(datagram).await,
-                    }
-                }
-
-                // Cleanup
-                Some(termination) = self.term_rx.recv() => {
-                    match termination {
-                        Terminated::Incoming(id) => {
-                            self.inner.incoming.transfers.remove(&id);
-                        }
-
-                        Terminated::Outgoing(id) => {
-                            self.inner.outgoing.transfers.remove(&id);
-                        }
-                    }
-                }
             }
         }
     }
@@ -562,17 +549,4 @@ impl Inner {
 enum Command {
     GetFile { local: String, remote: String },
     PutFile { local: String, remote: String },
-}
-
-impl Display for Command {
-    fn fmt(&self, f: &mut Formatter<'_>) -> std::fmt::Result {
-        match self {
-            Command::GetFile { local, remote } => {
-                write!(f, "GET {} TO {}", remote, local)
-            }
-            Command::PutFile { local, remote } => {
-                write!(f, "PUT {} TO {}", local, remote)
-            }
-        }
-    }
 }

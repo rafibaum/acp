@@ -19,7 +19,7 @@ use tokio::net::UdpSocket;
 use tokio::sync::mpsc;
 use tokio::sync::mpsc::{Receiver, Sender};
 use tokio::time::timeout;
-use tracing::instrument;
+use tracing::{debug, error, trace};
 
 const RTT_WINDOW: Duration = Duration::from_secs(10);
 
@@ -87,7 +87,6 @@ impl Client {
         }
     }
 
-    #[instrument(name = "client", level = "trace", skip(self), fields(addr = %self.addr))]
     pub async fn run(mut self) -> Result<()> {
         self.send().await?; // Acknowledge the established connection
         loop {
@@ -135,6 +134,7 @@ impl Client {
 
             if self.connection.is_closed() {
                 self.state = ClientState::Closed;
+                debug!("client connection closed");
                 break;
             }
 
@@ -154,12 +154,14 @@ impl Client {
         }
 
         if let Err(e) = self.parent_term.send(self.scid).await {
+            error!("client termination channel dropped");
             return Err(e).context("client termination channel dropped");
         }
 
         Ok(())
     }
 
+    #[tracing::instrument(level = "trace", skip(self))]
     async fn read_streams(&mut self) -> Result<()> {
         for stream_id in self.connection.readable() {
             let mut buf = self
@@ -173,6 +175,7 @@ impl Client {
         Ok(())
     }
 
+    #[tracing::instrument(level = "trace", skip(self))]
     async fn read_stream(&mut self, stream_id: u64, mut buf: &mut BytesMut) -> Result<()> {
         const QUEUE_BUMP_SIZE: usize = 1024;
 
@@ -185,12 +188,14 @@ impl Client {
         }
 
         buf.resize(len, 0);
+        trace!(len, "read new data from QUIC stream");
 
         loop {
             let packet = match proto::frame(&mut buf) {
                 Ok(Some(packet)) => packet,
                 Ok(None) => break,
                 Err(e) => {
+                    error!(err = %e, "could not frame packet in stream");
                     return Err(e.into());
                 }
             };
@@ -201,8 +206,10 @@ impl Client {
         Ok(())
     }
 
+    #[tracing::instrument(level = "trace", skip(self))]
     async fn read_dgrams(&mut self) -> Result<()> {
         while let Ok(len) = self.connection.dgram_recv(&mut self.dgram_buf) {
+            trace!(len, "received datagram");
             let datagram =
                 Datagram::decode(&self.dgram_buf[..len]).context("unable to frame datagram")?;
             self.process_dgram(datagram).await?;
@@ -211,16 +218,19 @@ impl Client {
         Ok(())
     }
 
+    #[tracing::instrument(level = "trace", skip(self, stream_id, packet))]
     async fn process(&mut self, stream_id: u64, packet: Packet) -> Result<()> {
         let data = match packet.data {
             Some(data) => data,
             None => {
+                error!("packet sent without data field");
                 return Err(AcpError::InvalidPacket).context("missing data field");
             }
         };
 
         match data {
             packet::Data::Ping(ping) => {
+                trace!(data = %&ping.data, "sending ping response");
                 let response = Packet::new(packet::Data::Ping(Ping { data: ping.data }));
                 self.send_packet(stream_id, response).await?;
             }
@@ -228,10 +238,12 @@ impl Client {
             packet::Data::StartBenchmark(_) => match &self.state {
                 ClientState::Connected => {
                     self.state = ClientState::Benchmarking(0);
+                    trace!("starting benchmark");
                     let response = Packet::new(packet::Data::StartBenchmark(StartBenchmark {}));
                     self.send_packet(stream_id, response).await?;
                 }
                 other => {
+                    error!(state = ?other, "received a start benchmarking packet unexpectedly");
                     return Err(AcpError::IllegalPacket)
                         .context("unexpected start benchmarking packet");
                 }
@@ -239,10 +251,12 @@ impl Client {
 
             packet::Data::StopBenchmark(_) => match &self.state {
                 ClientState::Benchmarking(data) => {
+                    trace!(data, "stopping benchmark");
                     println!("Benchmark stopped after: {}", data);
                     self.state = ClientState::Connected;
                 }
                 other => {
+                    error!(state = ?other, "received a stop benchmarking packet unexpectedly");
                     return Err(AcpError::IllegalPacket)
                         .context("unexpected stop benchmarking packet");
                 }
@@ -389,10 +403,12 @@ impl Client {
         Ok(())
     }
 
+    #[tracing::instrument(level = "trace", skip(self, datagram))]
     async fn process_dgram(&mut self, datagram: Datagram) -> Result<()> {
         let data = match datagram.data {
             Some(data) => data,
             None => {
+                error!("datagram sent without data field");
                 return Err(AcpError::InvalidPacket).context("datagram missing data field");
             }
         };
@@ -403,8 +419,14 @@ impl Client {
                 match &mut self.state {
                     ClientState::Benchmarking(data) => {
                         *data += payload.len() as u64;
+                        trace!(
+                            cumulative = *data,
+                            payload = payload.len(),
+                            "received benchmark payload"
+                        );
                     }
                     _ => {
+                        error!("received benchmark payload in illegal state");
                         return Err(AcpError::IllegalPacket)
                             .context("received benchmark payload in illegal state");
                     }
@@ -424,6 +446,7 @@ impl Client {
         Ok(())
     }
 
+    #[tracing::instrument(level = "trace", skip(self, stream_id, packet))]
     async fn send_packet(&mut self, stream_id: u64, packet: Packet) -> Result<()> {
         let mut buf = BytesMut::new();
         packet.encode_length_delimited(&mut buf)?;
@@ -431,6 +454,7 @@ impl Client {
             buf.advance(self.connection.stream_send(stream_id, &buf[..], false)?);
         }
 
+        trace!("packet fully buffered in stream");
         self.send().await
     }
 
@@ -441,6 +465,7 @@ impl Client {
         self.send().await
     }
 
+    #[tracing::instrument(level = "trace", skip(self))]
     async fn send(&mut self) -> Result<()> {
         loop {
             let len = match self.connection.send(&mut self.send_buf) {
@@ -449,6 +474,7 @@ impl Client {
                     return Ok(());
                 }
                 Err(e) => {
+                    error!(err = %e, "QUIC error while processing outgoing bytes");
                     return Err(e).context("QUIC error while processing outgoing bytes");
                 }
             };
@@ -459,23 +485,33 @@ impl Client {
                     .socket
                     .send_to(&self.send_buf[sent..len], self.addr)
                     .await?;
+                trace!(written, length = len, "sent datagram to client");
                 sent += written;
             }
         }
     }
 
+    #[tracing::instrument(level = "trace", skip(self, bytes))]
     async fn recv(&mut self, bytes: Option<BytesMut>) -> Result<()> {
         let mut bytes = match bytes {
             Some(bytes) => bytes,
             None => {
+                error!("client input channel dropped before client could safely terminate");
                 return Err(AcpServerError::ChannelDropped)
                     .context("client input channel dropped before client could safely terminate");
             }
         };
+        trace!(len = bytes.len(), "client received bytes");
 
         match self.connection.recv(&mut bytes) {
-            Ok(len) => Ok(()),
-            Err(e) => Err(e).context("QUIC error while processing incoming bytes"),
+            Ok(len) => {
+                trace!(read = len, total = bytes.len(), "QUIC accepted input bytes");
+                Ok(())
+            }
+            Err(e) => {
+                error!(err = %e, "QUIC error while processing incoming bytes");
+                Err(e).context("QUIC error while processing incoming bytes")
+            }
         }
     }
 }
@@ -488,6 +524,7 @@ async fn poll_socket(
         Some(duration) => match timeout(duration, rx.recv()).await {
             Ok(bytes) => bytes,
             Err(_) => {
+                trace!("timeout lapsed");
                 connection.on_timeout();
                 return Err(AcpError::TimeoutLapsed.into());
             }

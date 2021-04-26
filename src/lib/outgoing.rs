@@ -7,7 +7,6 @@ use ring::digest;
 use tokio::fs::File;
 use tokio::io::{AsyncReadExt, AsyncSeekExt, SeekFrom};
 use tokio::sync::mpsc::{Receiver, Sender};
-use tracing::{instrument, trace};
 
 use crate::proto::{
     datagram, packet, AckEndRound, BlockInfo, ControlUpdate, Datagram, EndRound, EndTransfer,
@@ -72,17 +71,9 @@ impl Outgoing {
     }
 
     /// Runs an outgoing file transfer.
-    #[instrument(name = "outgoing", level = "trace", skip(self), fields(id = ?self.inner.id))]
     pub async fn run(mut self) {
         loop {
             if self.inner.round_stall || self.inner.pieces_in_flight >= self.inner.window_size {
-                trace!(
-                    round_stall = self.inner.round_stall,
-                    pieces_in_flight = self.inner.pieces_in_flight,
-                    window_size = self.inner.window_size,
-                    "Transfer stalled"
-                );
-
                 if self.await_update().await {
                     break;
                 }
@@ -188,8 +179,6 @@ impl Inner {
 
         let (piece_num, buf) = pair;
 
-        trace!(piece_num, len = buf.len(), "Sending piece");
-
         let piece = Datagram::new(datagram::Data::SendPiece(SendPiece {
             id: self.id.clone(),
             piece: piece_num,
@@ -211,8 +200,6 @@ impl Inner {
         std::mem::swap(&mut ctx, &mut self.ctx);
         let checksum = ctx.finish();
 
-        trace!(block, ?checksum, "Sending block info");
-
         let info = Packet::new(packet::Data::BlockInfo(BlockInfo {
             id: self.id.clone(),
             block,
@@ -222,8 +209,7 @@ impl Inner {
     }
 
     async fn end_round(&mut self) {
-        trace!(round = self.round.num(), "Ending round");
-
+        println!("Ending round {}", self.round.num());
         self.tx
             .send(OutgoingData::Stream(Packet::new(packet::Data::EndRound(
                 EndRound {
@@ -239,33 +225,22 @@ impl Inner {
     //TODO: Review return types
     fn apply_update(&mut self, update: IncomingPacket) -> bool {
         match update {
-            IncomingPacket::ControlUpdate(control) => {
+            IncomingPacket::ControlUpdate(update) => {
                 // Decrement pieces in flight
+                self.pieces_in_flight =
+                    self.pieces_in_flight.saturating_sub(update.received as u64);
                 self.pieces_in_flight = self
                     .pieces_in_flight
-                    .saturating_sub(control.received as u64);
-                self.pieces_in_flight = self
-                    .pieces_in_flight
-                    .saturating_sub(control.lost.len() as u64);
+                    .saturating_sub(update.lost.len() as u64);
 
-                self.target_window = control.window_size;
+                self.target_window = update.window_size;
                 self.window_size = std::cmp::min(
                     self.target_window,
-                    self.window_size + control.received as u64,
+                    self.window_size + update.received as u64,
                 );
 
-                trace!(
-                    received = control.received,
-                    target_window = control.window_size,
-                    lost = control.lost.len(),
-                    pieces_in_flight = self.pieces_in_flight,
-                    window_size = self.window_size,
-                    "Applied transfer update"
-                );
-
-                self.lost.extend(control.lost.into_iter().map(Reverse));
+                self.lost.extend(update.lost.into_iter().map(Reverse));
             }
-
             IncomingPacket::AckEndRound(ack) => {
                 if ack.round != self.round.num() {
                     panic!("Received next round command for incorrect round");
@@ -279,6 +254,8 @@ impl Inner {
                 let mut pieces = BinaryHeap::new();
                 std::mem::swap(&mut pieces, &mut self.lost);
 
+                println!("Starting next round");
+
                 self.round = match self.round {
                     Round::First { .. } => Round::Retransmit { num: 1, pieces },
                     Round::Retransmit { num, .. } => Round::Retransmit {
@@ -287,13 +264,10 @@ impl Inner {
                     },
                 };
 
-                trace!(new_round = self.round.num(), "Starting next round");
-
                 self.round_stall = false;
             }
 
             IncomingPacket::EndTransfer(_) => {
-                trace!("Ending transfer");
                 return true;
             }
         }
