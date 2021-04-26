@@ -1,7 +1,8 @@
 //! Types for handling incoming file transfers.
 
 use crate::minmax::Minmax;
-use crate::proto::{packet, AckEndRound, EndTransfer, OutgoingData, Packet};
+use crate::mpsc as resizable;
+use crate::proto::{packet, AckEndRound, EndTransfer, OutgoingData, Packet, SendPiece};
 use crate::{proto, Terminated};
 use bitvec::vec::BitVec;
 use ring::digest;
@@ -30,7 +31,8 @@ pub struct Incoming {
     block_size: u32,
     /// Size of each piece in bytes
     piece_size: u32,
-    rx: Receiver<IncomingPacket>,
+    info_rx: Receiver<IncomingPacket>,
+    piece_rx: resizable::Receiver<SendPiece>,
     tx: Sender<OutgoingData>,
     blocks_received: u64,
     highest_piece: u64,
@@ -62,7 +64,8 @@ impl Incoming {
     /// Constructs a new incoming file transfer.
     pub fn new(
         id: Vec<u8>,
-        rx: Receiver<IncomingPacket>,
+        info_rx: Receiver<IncomingPacket>,
+        piece_rx: resizable::Receiver<SendPiece>,
         tx: Sender<OutgoingData>,
         file: File,
         file_size: u64,
@@ -85,7 +88,8 @@ impl Incoming {
             num_blocks: blocks_cap,
             block_size,
             piece_size,
-            rx,
+            info_rx,
+            piece_rx,
             tx,
             blocks_received: 0,
             highest_piece: 0,
@@ -108,33 +112,12 @@ impl Incoming {
     pub async fn run(mut self) {
         loop {
             // Splitting borrows
-            let rx = &mut self.rx;
+            let info_rx = &mut self.info_rx;
             let next_gc = self.next_gc.as_ref();
+            let piece_rx = &mut self.piece_rx;
 
             tokio::select! {
-                // Receive a packet
-                packet = rx.recv() => {
-                    match packet {
-                        Some(packet) => {
-                            match packet {
-                                IncomingPacket::Data(packet) => {
-                                    if self.read_packet(packet).await {
-                                        break;
-                                    }
-                                }
-
-                                IncomingPacket::EndRound(end) => {
-                                    println!("Ending round {}", end.round);
-                                    let gc_interval = Duration::from_nanos(self.rtt.load(Ordering::Relaxed) / GC_INTERVAL);
-                                    self.next_gc = Some(Instant::now() + gc_interval);
-                                    self.draining_round = Some(DrainState::Draining(end.round));
-                                }
-                            }
-
-                        },
-                        None => panic!("File transfer channel dropped"),
-                    }
-                }
+                biased;
 
                 // GC triggered
                 true = async {
@@ -149,6 +132,33 @@ impl Incoming {
                 } => {
                     self.next_gc = None;
                     self.gc().await;
+                }
+
+                // Priority data
+                packet = info_rx.recv() => {
+                    let packet = packet.unwrap();
+                    match packet {
+                        IncomingPacket::BlockInfo(info) => {
+                            if self.read_packet(IncomingData::BlockInfo(info)).await {
+                                break;
+                            }
+                        }
+
+                        IncomingPacket::EndRound(end) => {
+                            println!("Ending round {}", end.round);
+                            let gc_interval = Duration::from_nanos(self.rtt.load(Ordering::Relaxed) / GC_INTERVAL);
+                            self.next_gc = Some(Instant::now() + gc_interval);
+                            self.draining_round = Some(DrainState::Draining(end.round));
+                        }
+                    }
+                }
+
+                // Incoming piece
+                packet = piece_rx.recv() => {
+                    let packet = packet.unwrap();
+                    if self.read_packet(IncomingData::Piece(packet)).await {
+                        break;
+                    }
                 }
             }
         }
@@ -275,6 +285,8 @@ impl Incoming {
         let mut window_size = rtt / self.piece_min.as_nanos() as u64;
         // Build in a queue of double and assume minimum piece time is half of regular time
         window_size *= 4;
+        self.piece_rx.resize(window_size as usize);
+        // TODO: Handle window resizing differently
 
         let update = proto::ControlUpdate {
             id: self.id.clone(),
@@ -427,8 +439,8 @@ enum BlockStatus {
 /// A packet routed into an incoming transfer.
 #[derive(Debug)]
 pub enum IncomingPacket {
-    /// A packet which will further transfer progress (like a piece).
-    Data(IncomingData),
+    /// Incoming information for a block.
+    BlockInfo(proto::BlockInfo),
     /// Informing the receiver the round has ended so it can start draining the transfer.
     EndRound(proto::EndRound),
 }

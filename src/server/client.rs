@@ -1,7 +1,10 @@
 use crate::{router, AcpServerError};
 use anyhow::{Context, Result};
 use bytes::{Buf, BytesMut};
-use libacp::proto::{datagram, packet, AcceptDownload, AcceptUpload, OutgoingData, StartBenchmark};
+use libacp::mpsc as resizable;
+use libacp::proto::{
+    datagram, packet, AcceptDownload, AcceptUpload, OutgoingData, SendPiece, StartBenchmark,
+};
 use libacp::proto::{Datagram, Packet, Ping};
 use libacp::{incoming, outgoing};
 use libacp::{proto, AcpError};
@@ -17,6 +20,7 @@ use std::time::{Duration, Instant};
 use tokio::fs::{File, OpenOptions};
 use tokio::net::UdpSocket;
 use tokio::sync::mpsc;
+use tokio::sync::mpsc::error::TrySendError;
 use tokio::sync::mpsc::{Receiver, Sender};
 use tokio::time::timeout;
 use tracing::{debug, error, trace};
@@ -34,7 +38,7 @@ pub struct Client {
     dgram_buf: BytesMut,
     stream_bufs: HashMap<u64, BytesMut>,
     state: ClientState,
-    incoming: HashMap<Vec<u8>, Sender<incoming::IncomingPacket>>,
+    incoming: HashMap<Vec<u8>, IncomingHandle>,
     outgoing: HashMap<Vec<u8>, Sender<outgoing::IncomingPacket>>,
     out_tx: Sender<OutgoingData>,
     out_rx: Receiver<OutgoingData>,
@@ -42,6 +46,11 @@ pub struct Client {
     term_rx: Receiver<Terminated>,
     rtt_filter: Minmax<Instant, u64>,
     rtt_min: Arc<AtomicU64>,
+}
+
+struct IncomingHandle {
+    info_tx: Sender<incoming::IncomingPacket>,
+    piece_tx: resizable::Sender<SendPiece>,
 }
 
 impl Client {
@@ -271,10 +280,13 @@ impl Client {
                     .await
                     .unwrap();
 
-                let (tx, rx) = mpsc::channel(32);
+                let (info_tx, info_rx) = mpsc::channel(32);
+                let (piece_tx, piece_rx) = resizable::resizable(4);
+
                 let incoming = incoming::Incoming::new(
                     info.id.clone(),
-                    rx,
+                    info_rx,
+                    piece_rx,
                     self.out_tx.clone(),
                     file,
                     info.size,
@@ -284,7 +296,8 @@ impl Client {
                     self.term_tx.clone(),
                 );
 
-                self.incoming.insert(info.id.clone(), tx);
+                self.incoming
+                    .insert(info.id.clone(), IncomingHandle { info_tx, piece_tx });
                 tokio::spawn(async move {
                     let start = Instant::now();
                     println!("Starting upload...");
@@ -300,9 +313,8 @@ impl Client {
             packet::Data::BlockInfo(info) => match self.incoming.get(&info.id) {
                 Some(incoming) => {
                     incoming
-                        .send(incoming::IncomingPacket::Data(
-                            incoming::IncomingData::BlockInfo(info),
-                        ))
+                        .info_tx
+                        .send(incoming::IncomingPacket::BlockInfo(info))
                         .await
                         .unwrap();
                 }
@@ -319,6 +331,7 @@ impl Client {
 
                 Some(incoming) => {
                     incoming
+                        .info_tx
                         .send(incoming::IncomingPacket::EndRound(end))
                         .await
                         .unwrap();
@@ -436,9 +449,9 @@ impl Client {
             datagram::Data::SendPiece(piece) => {
                 if let Some(incoming) = self.incoming.get(&piece.id) {
                     // No need to do anything if this fails, just drop the piece silently
-                    let _ = incoming.try_send(incoming::IncomingPacket::Data(
-                        incoming::IncomingData::Piece(piece),
-                    ));
+                    if let Err(TrySendError::Closed(_)) = incoming.piece_tx.try_send(piece) {
+                        panic!("Piece channel closed");
+                    }
                 }
             }
         }

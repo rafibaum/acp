@@ -7,9 +7,10 @@
 use anyhow::Result;
 use bytes::{Buf, BytesMut};
 use libacp::incoming::Incoming;
+use libacp::mpsc as resizable;
 use libacp::outgoing::Outgoing;
 use libacp::proto::packet::Data;
-use libacp::proto::{datagram, AcceptDownload, OutgoingData, RequestDownload};
+use libacp::proto::{datagram, AcceptDownload, OutgoingData, RequestDownload, SendPiece};
 use libacp::proto::{Datagram, Packet, RequestUpload};
 use libacp::{incoming, outgoing, proto};
 use libacp::{Minmax, Terminated};
@@ -111,14 +112,20 @@ struct OutgoingTransfers {
 }
 
 struct IncomingTransfers {
-    transfers: HashMap<Vec<u8>, Sender<incoming::IncomingPacket>>,
+    transfers: HashMap<Vec<u8>, IncomingHandle>,
     pending: HashMap<Vec<u8>, oneshot::Sender<DownloadStartHandle>>,
 }
 
 #[derive(Debug)]
 struct DownloadStartHandle {
-    rx: Receiver<incoming::IncomingPacket>,
+    info_rx: Receiver<incoming::IncomingPacket>,
+    piece_rx: resizable::Receiver<SendPiece>,
     info: AcceptDownload,
+}
+
+struct IncomingHandle {
+    info_tx: Sender<incoming::IncomingPacket>,
+    piece_tx: resizable::Sender<SendPiece>,
 }
 
 impl Client {
@@ -247,7 +254,8 @@ impl Client {
                         let start = start_rx.await.unwrap();
                         let incoming = Incoming::new(
                             id,
-                            start.rx,
+                            start.info_rx,
+                            start.piece_rx,
                             in_tx,
                             file,
                             start.info.size,
@@ -454,11 +462,16 @@ impl Inner {
             Data::AcceptDownload(download) => {
                 let start = self.incoming.pending.remove(&download.id).unwrap();
 
-                let (in_tx, in_rx) = mpsc::channel(32);
-                self.incoming.transfers.insert(download.id.clone(), in_tx);
+                let (info_tx, info_rx) = mpsc::channel(32);
+                let (piece_tx, piece_rx) = resizable::resizable(4);
+
+                self.incoming
+                    .transfers
+                    .insert(download.id.clone(), IncomingHandle { info_tx, piece_tx });
                 start
                     .send(DownloadStartHandle {
-                        rx: in_rx,
+                        info_rx,
+                        piece_rx,
                         info: download,
                     })
                     .unwrap();
@@ -467,9 +480,8 @@ impl Inner {
             Data::BlockInfo(info) => {
                 let transfer = self.incoming.transfers.get_mut(&info.id).unwrap();
                 transfer
-                    .send(incoming::IncomingPacket::Data(
-                        incoming::IncomingData::BlockInfo(info),
-                    ))
+                    .info_tx
+                    .send(incoming::IncomingPacket::BlockInfo(info))
                     .await
                     .unwrap();
             }
@@ -477,6 +489,7 @@ impl Inner {
             Data::EndRound(end) => {
                 let transfer = self.incoming.transfers.get_mut(&end.id).unwrap();
                 transfer
+                    .info_tx
                     .send(incoming::IncomingPacket::EndRound(end))
                     .await
                     .unwrap();
@@ -510,9 +523,7 @@ impl Inner {
         match data {
             datagram::Data::SendPiece(piece) => {
                 let transfer = self.incoming.transfers.get_mut(&piece.id).unwrap();
-                if let Err(TrySendError::Closed(_)) = transfer.try_send(
-                    incoming::IncomingPacket::Data(incoming::IncomingData::Piece(piece)),
-                ) {
+                if let Err(TrySendError::Closed(_)) = transfer.piece_tx.try_send(piece) {
                     panic!("Transfer closed!");
                 }
             }

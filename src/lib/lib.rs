@@ -9,6 +9,7 @@ pub use crate::minmax::Minmax;
 
 pub mod incoming;
 mod minmax;
+pub mod mpsc;
 pub mod outgoing;
 pub mod proto;
 
