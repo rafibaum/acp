@@ -9,13 +9,17 @@ mod router;
 
 use crate::router::Router;
 use anyhow::{Context, Result};
+use clap::App;
 use quiche::CongestionControlAlgorithm;
 use thiserror::Error;
 
 /// Server's main function. Starts the router and manages top-level error handling.
 #[tokio::main]
 async fn main() -> Result<()> {
-    tracing_subscriber::fmt::init();
+    let cli = App::new("acpd")
+        .version("0.1")
+        .author("Rafi Baum <rafi@ukbaums.com>")
+        .get_matches();
 
     let mut config = quiche::Config::new(quiche::PROTOCOL_VERSION).unwrap();
     config.set_application_protos(b"\x07acp/0.1").unwrap();

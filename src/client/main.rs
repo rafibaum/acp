@@ -6,6 +6,7 @@
 
 use anyhow::Result;
 use bytes::{Buf, BytesMut};
+use clap::{App, AppSettings, Arg, SubCommand};
 use libacp::incoming::Incoming;
 use libacp::mpsc as resizable;
 use libacp::outgoing::Outgoing;
@@ -35,9 +36,58 @@ const RTT_WINDOW: Duration = Duration::from_secs(10);
 /// Client's main function.
 #[tokio::main]
 async fn main() -> Result<()> {
-    let args: Vec<String> = std::env::args().collect();
-    let local = &args[1];
-    let remote = &args[2];
+    let cli = App::new("acp")
+        .version("0.1")
+        .author("Rafi Baum <rafi@ukbaums.com>")
+        .setting(AppSettings::SubcommandRequiredElseHelp)
+        .subcommand(
+            SubCommand::with_name("get")
+                .about("download a file")
+                .arg(
+                    Arg::with_name("SOURCE")
+                        .help("File to download")
+                        .required(true)
+                        .index(1),
+                )
+                .arg(
+                    Arg::with_name("DESTINATION")
+                        .help("File output path")
+                        .required(true)
+                        .index(2),
+                ),
+        )
+        .subcommand(
+            SubCommand::with_name("put")
+                .about("upload a file")
+                .arg(
+                    Arg::with_name("SOURCE")
+                        .help("File to upload")
+                        .required(true)
+                        .index(1),
+                )
+                .arg(
+                    Arg::with_name("DESTINATION")
+                        .help("File upload destination")
+                        .required(true)
+                        .index(2),
+                ),
+        );
+
+    let matches = cli.get_matches();
+
+    let command = if let Some(matches) = matches.subcommand_matches("get") {
+        Command::GetFile {
+            local: matches.value_of("DESTINATION").unwrap().to_owned(),
+            remote: matches.value_of("SOURCE").unwrap().to_owned(),
+        }
+    } else if let Some(matches) = matches.subcommand_matches("put") {
+        Command::PutFile {
+            local: matches.value_of("SOURCE").unwrap().to_owned(),
+            remote: matches.value_of("DESTINATION").unwrap().to_owned(),
+        }
+    } else {
+        panic!("No subcommand found!");
+    };
 
     let sock = UdpSocket::bind("127.0.0.1:55281").await.unwrap();
     sock.connect("127.0.0.1:55280").await.unwrap();
@@ -68,14 +118,7 @@ async fn main() -> Result<()> {
     let (tx, rx) = mpsc::channel(32);
     let client = Client::new(conn, sock, rx, rng);
 
-    tx.send(Command::GetFile {
-        local: local.clone(),
-        remote: remote.clone(),
-    })
-    .await
-    .unwrap();
-
-    // Set up command input
+    tx.send(command).await.unwrap();
     std::mem::drop(tx);
 
     client.run().await;
