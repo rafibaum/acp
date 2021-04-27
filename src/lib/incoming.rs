@@ -42,7 +42,7 @@ pub struct Incoming {
     marked: HashSet<u64>,
     lost: HashSet<u64>,
     next_gc: Option<Instant>,
-    draining_round: Option<DrainState>,
+    draining_round: Option<u32>,
     piece_start: Option<Instant>,
     piece_min: Duration,
     piece_filter: Minmax<Instant, Duration>,
@@ -148,7 +148,7 @@ impl Incoming {
                             println!("Ending round {}", end.round);
                             let gc_interval = Duration::from_nanos(self.rtt.load(Ordering::Relaxed) / GC_INTERVAL);
                             self.next_gc = Some(Instant::now() + gc_interval);
-                            self.draining_round = Some(DrainState::Draining(end.round));
+                            self.draining_round = Some(end.round);
                         }
                     }
                 }
@@ -295,13 +295,6 @@ impl Incoming {
             window_size,
         };
 
-        println!(
-            "Update, received: {}, lost: {}, window: {}",
-            update.received,
-            self.lost.len(),
-            window_size
-        );
-
         self.tx
             .send(OutgoingData::Stream(Packet::new(
                 packet::Data::ControlUpdate(update),
@@ -312,14 +305,7 @@ impl Incoming {
         self.piece_relief = 0;
 
         let range = match self.draining_round {
-            Some(DrainState::Drained(round)) => {
-                self.end_round(round).await;
-                return;
-            }
-            Some(DrainState::Draining(round)) => {
-                self.draining_round = Some(DrainState::Drained(round));
-                &self.pieces_received[(self.marked_to as usize)..]
-            }
+            Some(_) => &self.pieces_received[(self.marked_to as usize)..],
             None => &self.pieces_received[(self.marked_to as usize)..(self.highest_piece as usize)],
         };
 
@@ -333,19 +319,19 @@ impl Incoming {
 
         if !self.marked.is_empty() {
             self.schedule_gc();
-        } else if let Some(draining) = self.draining_round {
-            self.end_round(draining.round()).await;
+        } else if let Some(round) = self.draining_round {
+            self.end_round(round).await;
         }
     }
 
     async fn end_round(&mut self, round: u32) {
+        println!("Starting next round, lost: {}", self.lost.len());
+
         self.highest_piece = 0;
         self.marked_to = 0;
         self.marked.clear();
         self.lost.clear();
         self.draining_round = None;
-
-        println!("Starting next round");
 
         let ack = Packet::new(packet::Data::AckEndRound(AckEndRound {
             id: self.id.clone(),
@@ -452,21 +438,6 @@ pub enum IncomingData {
     Piece(proto::SendPiece),
     /// Incoming information for a block.
     BlockInfo(proto::BlockInfo),
-}
-
-#[derive(Copy, Clone)]
-enum DrainState {
-    Draining(u32),
-    Drained(u32),
-}
-
-impl DrainState {
-    fn round(&self) -> u32 {
-        *match self {
-            DrainState::Draining(num) => num,
-            DrainState::Drained(num) => num,
-        }
-    }
 }
 
 #[inline]

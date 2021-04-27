@@ -87,7 +87,6 @@ impl Outgoing {
             }
         }
 
-        println!("Lost: {:?}", self.inner.lost);
         self.term_tx
             .send(Terminated::Outgoing(self.inner.id))
             .await
