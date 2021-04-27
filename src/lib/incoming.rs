@@ -272,7 +272,6 @@ impl Incoming {
             if !self.pieces_received[*marked as usize] {
                 // Piece has not been received, mark as lost
                 newly_lost.push(*marked);
-            } else {
             }
         }
         self.marked.clear();
