@@ -339,8 +339,8 @@ impl Client {
             },
 
             packet::Data::RequestDownload(download) => {
-                const BLOCK_SIZE: u32 = 800;
-                const PIECE_SIZE: u32 = 4000;
+                const BLOCK_SIZE: u32 = 3200;
+                const PIECE_SIZE: u32 = 1000;
 
                 let file = File::open(String::from_utf8(download.filename).unwrap())
                     .await

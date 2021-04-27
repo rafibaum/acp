@@ -216,7 +216,7 @@ impl Incoming {
                 }
 
                 let offset = piece.piece * self.piece_size as u64;
-                if piece.piece % 100 == 0 {
+                if piece.piece % 1000 == 0 {
                     println!("Received piece {}", piece.piece);
                 }
 

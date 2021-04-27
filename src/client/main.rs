@@ -45,8 +45,8 @@ async fn main() -> Result<()> {
     let mut config = quiche::Config::new(quiche::PROTOCOL_VERSION).unwrap();
     config.set_application_protos(b"\x07acp/0.1").unwrap();
     config.verify_peer(false);
-    config.set_max_recv_udp_payload_size(8192);
-    config.set_max_send_udp_payload_size(8192);
+    config.set_max_recv_udp_payload_size(1200);
+    config.set_max_send_udp_payload_size(1200);
     config.set_initial_max_data(1000000);
     config.set_initial_max_streams_bidi(1);
     config.set_initial_max_streams_uni(1);
@@ -210,8 +210,8 @@ impl Client {
                         id: id.clone(),
                         filename: remote.into_bytes(),
                         size: file.metadata().await.unwrap().len(),
-                        block_size: 800,
-                        piece_size: 4000,
+                        block_size: 3200,
+                        piece_size: 1000,
                     }));
                     self.inner.send_packet(0, packet).await;
 
@@ -220,7 +220,7 @@ impl Client {
 
                     tokio::spawn(async {
                         let in_rx = start_rx.await.unwrap();
-                        let outgoing = Outgoing::new(id, file, 800, 4000, out_tx, in_rx, term_tx);
+                        let outgoing = Outgoing::new(id, file, 3200, 1000, out_tx, in_rx, term_tx);
                         outgoing.run().await
                     })
                 }
