@@ -4,22 +4,21 @@
 
 #![warn(missing_docs)]
 
+mod cli;
 mod client;
 mod router;
 
 use crate::router::Router;
 use anyhow::{Context, Result};
-use clap::App;
 use quiche::CongestionControlAlgorithm;
 use thiserror::Error;
 
 /// Server's main function. Starts the router and manages top-level error handling.
 #[tokio::main]
 async fn main() -> Result<()> {
-    let cli = App::new("acpd")
-        .version("0.1")
-        .author("Rafi Baum <rafi@ukbaums.com>")
-        .get_matches();
+    let cli = cli::build_cli().get_matches();
+
+    let bind_addr = cli.value_of("bind").unwrap_or("127.0.0.1:55280");
 
     let mut config = quiche::Config::new(quiche::PROTOCOL_VERSION).unwrap();
     config.set_application_protos(b"\x07acp/0.1").unwrap();
@@ -41,7 +40,7 @@ async fn main() -> Result<()> {
     config.enable_dgram(true, 512, 512);
     config.set_cc_algorithm(CongestionControlAlgorithm::BBR);
 
-    let router = Router::new("127.0.0.1:55280", config).await?;
+    let router = Router::new(bind_addr, config).await?;
     router.run().await
 }
 

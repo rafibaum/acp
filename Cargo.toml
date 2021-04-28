@@ -30,4 +30,5 @@ tokio = { version = "1.5", features = ["full"] }
 tracing = "0.1"
 
 [build-dependencies]
+clap = "2.33"
 prost-build = "0.7.0"

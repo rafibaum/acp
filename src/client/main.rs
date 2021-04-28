@@ -6,7 +6,6 @@
 
 use anyhow::Result;
 use bytes::{Buf, BytesMut};
-use clap::{App, AppSettings, Arg, SubCommand};
 use libacp::incoming::Incoming;
 use libacp::mpsc as resizable;
 use libacp::outgoing::Outgoing;
@@ -31,49 +30,18 @@ use tokio::sync::mpsc::error::TrySendError;
 use tokio::sync::mpsc::{Receiver, Sender};
 use tokio::sync::oneshot;
 
+mod cli;
+
 const RTT_WINDOW: Duration = Duration::from_secs(10);
 
 /// Client's main function.
 #[tokio::main]
 async fn main() -> Result<()> {
-    let cli = App::new("acp")
-        .version("0.1")
-        .author("Rafi Baum <rafi@ukbaums.com>")
-        .setting(AppSettings::SubcommandRequiredElseHelp)
-        .subcommand(
-            SubCommand::with_name("get")
-                .about("download a file")
-                .arg(
-                    Arg::with_name("SOURCE")
-                        .help("File to download")
-                        .required(true)
-                        .index(1),
-                )
-                .arg(
-                    Arg::with_name("DESTINATION")
-                        .help("File output path")
-                        .required(true)
-                        .index(2),
-                ),
-        )
-        .subcommand(
-            SubCommand::with_name("put")
-                .about("upload a file")
-                .arg(
-                    Arg::with_name("SOURCE")
-                        .help("File to upload")
-                        .required(true)
-                        .index(1),
-                )
-                .arg(
-                    Arg::with_name("DESTINATION")
-                        .help("File upload destination")
-                        .required(true)
-                        .index(2),
-                ),
-        );
+    let cli = cli::build_cli();
 
     let matches = cli.get_matches();
+
+    let server = matches.value_of("SERVER").unwrap_or("127.0.0.1:55280");
 
     let command = if let Some(matches) = matches.subcommand_matches("get") {
         Command::GetFile {
@@ -89,8 +57,8 @@ async fn main() -> Result<()> {
         panic!("No subcommand found!");
     };
 
-    let sock = UdpSocket::bind("127.0.0.1:55281").await.unwrap();
-    sock.connect("127.0.0.1:55280").await.unwrap();
+    let sock = UdpSocket::bind("0.0.0.0:55281").await.unwrap();
+    sock.connect(server).await.unwrap();
 
     let mut config = quiche::Config::new(quiche::PROTOCOL_VERSION).unwrap();
     config.set_application_protos(b"\x07acp/0.1").unwrap();
