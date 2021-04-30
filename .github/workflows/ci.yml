@@ -1,0 +1,28 @@
+name: CI
+
+on: [push, pull_request]
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  build-linux:
+
+    runs-on: ubuntu-latest
+
+    steps:
+    - uses: actions/checkout@v2
+    - name: Style
+      run: cargo fmt --all -- --check
+    - name: Build
+      run: cargo build --verbose --release
+    - name: Test
+      run: cargo test --verbose
+    - uses: actions/upload-artifact@v2
+      with: 
+        name: acp
+        path: target/release/acp
+    - uses: actions/upload-artifact@v2
+      with: 
+        name: acpd
+        path: target/release/acpd
