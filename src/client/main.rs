@@ -225,8 +225,8 @@ impl Client {
                         id: id.clone(),
                         filename: remote.into_bytes(),
                         size: file.metadata().await.unwrap().len(),
-                        block_size: 3200,
-                        piece_size: 1000,
+                        block_size: 2048,
+                        piece_size: 1024,
                     }));
                     self.inner.send_packet(0, packet).await;
 
@@ -235,7 +235,7 @@ impl Client {
 
                     tokio::spawn(async {
                         let in_rx = start_rx.await.unwrap();
-                        let outgoing = Outgoing::new(id, file, 3200, 1000, out_tx, in_rx, term_tx);
+                        let outgoing = Outgoing::new(id, file, 2048, 1024, out_tx, in_rx, term_tx);
                         outgoing.run().await
                     })
                 }
