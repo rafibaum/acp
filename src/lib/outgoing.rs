@@ -15,8 +15,6 @@ use crate::proto::{
 use crate::Terminated;
 use futures::FutureExt;
 
-const INITIAL_WINDOW_SIZE: u64 = 2;
-
 /// Type for managing information relating to an outgoing file transfer.
 pub struct Outgoing {
     inner: Inner,
@@ -62,8 +60,8 @@ impl Outgoing {
                 round: Round::First { piece: 0 },
                 round_stall: false,
                 pieces_in_flight: 0,
-                window_size: INITIAL_WINDOW_SIZE,
-                target_window: INITIAL_WINDOW_SIZE,
+                window_size: crate::INITIAL_WINDOW_SIZE,
+                target_window: crate::INITIAL_WINDOW_SIZE,
             },
             rx,
             term_tx,

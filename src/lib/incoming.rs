@@ -48,6 +48,7 @@ pub struct Incoming {
     piece_filter: Minmax<Instant, Duration>,
     rtt: Arc<AtomicU64>,
     term_tx: Sender<Terminated>,
+    window_size: u64,
 }
 
 struct BlockInfo {
@@ -105,6 +106,7 @@ impl Incoming {
             piece_filter: Minmax::new(Instant::now(), INITIAL_AVG_PIECE_TIME),
             rtt,
             term_tx,
+            window_size: crate::INITIAL_WINDOW_SIZE,
         }
     }
 
@@ -284,7 +286,9 @@ impl Incoming {
         let mut window_size = rtt / self.piece_min.as_nanos() as u64;
         // Build in a queue of double and assume minimum piece time is half of regular time
         window_size *= 4;
-        self.piece_rx.resize(window_size as usize);
+        self.window_size = std::cmp::max(self.window_size, window_size);
+
+        self.piece_rx.resize(self.window_size as usize);
         // TODO: Handle window resizing differently
 
         let update = proto::ControlUpdate {

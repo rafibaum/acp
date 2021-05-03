@@ -13,6 +13,8 @@ pub mod mpsc;
 pub mod outgoing;
 pub mod proto;
 
+pub const INITIAL_WINDOW_SIZE: u64 = 4;
+
 /// ACP errors which are relevant in both the client and server.
 #[derive(Debug)]
 pub enum AcpError {
