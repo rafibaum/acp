@@ -5,7 +5,7 @@ use std::collections::BinaryHeap;
 
 use ring::digest;
 use tokio::fs::File;
-use tokio::io::{AsyncReadExt, AsyncSeekExt, SeekFrom};
+use tokio::io::{AsyncReadExt, AsyncSeekExt, BufReader, SeekFrom};
 use tokio::sync::mpsc::{Receiver, Sender};
 
 use crate::proto::{
@@ -24,7 +24,7 @@ pub struct Outgoing {
 
 struct Inner {
     id: Vec<u8>,
-    file: File,
+    file: PieceFile,
     piece_size: u32,
     block_size: u64,
     tx: Sender<OutgoingData>,
@@ -51,7 +51,7 @@ impl Outgoing {
         Outgoing {
             inner: Inner {
                 id,
-                file,
+                file: PieceFile::new(file),
                 piece_size,
                 block_size: block_size as u64,
                 tx,
@@ -252,14 +252,8 @@ impl Inner {
                 std::mem::swap(&mut pieces, &mut self.lost);
 
                 println!("Starting next round");
-
-                self.round = match self.round {
-                    Round::First { .. } => Round::Retransmit { num: 1, pieces },
-                    Round::Retransmit { num, .. } => Round::Retransmit {
-                        num: num + 1,
-                        pieces,
-                    },
-                };
+                self.file.unbuffer();
+                self.round.next(pieces);
 
                 self.round_stall = false;
             }
@@ -300,5 +294,47 @@ impl Round {
             Round::First { .. } => 0,
             Round::Retransmit { num, .. } => *num,
         }
+    }
+
+    fn next(&mut self, pieces: BinaryHeap<Reverse<u64>>) {
+        let next_num = self.num() + 1;
+        *self = Round::Retransmit {
+            num: next_num,
+            pieces,
+        }
+    }
+}
+
+enum PieceFile {
+    Unbuffered(File),
+    Buffered(Option<BufReader<File>>),
+}
+
+impl PieceFile {
+    pub fn new(file: File) -> Self {
+        PieceFile::Buffered(Some(BufReader::new(file)))
+    }
+
+    pub async fn read(&mut self, mut buf: &mut [u8]) -> tokio::io::Result<usize> {
+        match self {
+            PieceFile::Unbuffered(file) => file.read(&mut buf).await,
+            PieceFile::Buffered(file) => file.as_mut().unwrap().read(&mut buf).await,
+        }
+    }
+
+    pub async fn seek(&mut self, pos: SeekFrom) -> tokio::io::Result<u64> {
+        match self {
+            PieceFile::Unbuffered(file) => file.seek(pos).await,
+            PieceFile::Buffered(_) => panic!("Cannot seek buffered piece file"),
+        }
+    }
+
+    pub fn unbuffer(&mut self) {
+        let file = match self {
+            PieceFile::Buffered(reader) => reader.take().unwrap().into_inner(),
+            PieceFile::Unbuffered(_) => panic!("File is already unbuffered"),
+        };
+
+        *self = PieceFile::Unbuffered(file)
     }
 }
