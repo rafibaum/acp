@@ -117,11 +117,12 @@ impl Incoming {
             let info_rx = &mut self.info_rx;
             let next_gc = self.next_gc.as_ref();
             let piece_rx = &mut self.piece_rx;
+            let is_draining = self.draining_round.is_some();
 
             tokio::select! {
                 biased;
 
-                // GC triggered
+                // GC triggered, prioritise when not draining
                 true = async {
                     match next_gc {
                         Some(deadline) => {
@@ -131,7 +132,7 @@ impl Incoming {
 
                         None => false,
                     }
-                } => {
+                }, if !is_draining => {
                     self.next_gc = None;
                     self.gc().await;
                 }
@@ -161,6 +162,21 @@ impl Incoming {
                     if self.read_packet(IncomingData::Piece(packet)).await {
                         break;
                     }
+                }
+
+                // GC triggered, drained queues
+                true = async {
+                    match next_gc {
+                        Some(deadline) => {
+                            tokio::time::sleep_until(*deadline).await;
+                            true
+                        }
+
+                        None => false,
+                    }
+                }, if is_draining => {
+                    self.next_gc = None;
+                    self.gc().await;
                 }
             }
         }
