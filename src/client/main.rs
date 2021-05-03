@@ -115,6 +115,8 @@ struct Inner {
     rtt_min: Arc<AtomicU64>,
     rtt_filter: Minmax<Instant, u64>,
     term_tx: Sender<Terminated>,
+    dgram_slot: Option<BytesMut>,
+    stream_slot: Option<(u64, BytesMut)>,
 }
 
 struct OutgoingTransfers {
@@ -182,6 +184,8 @@ impl Client {
                 rtt_min: Arc::new(AtomicU64::new(rtt)),
                 rtt_filter: Minmax::new(Instant::now(), rtt),
                 term_tx,
+                dgram_slot: None,
+                stream_slot: None,
             },
             stream_bufs: HashMap::new(),
             out_rx,
@@ -284,6 +288,9 @@ impl Client {
 
             // Process network traffic until command finished
             loop {
+                let should_send_out =
+                    self.inner.dgram_slot.is_none() && self.inner.stream_slot.is_none();
+
                 tokio::select! {
                     // Command finished
                     _ = &mut handle => break,
@@ -297,6 +304,8 @@ impl Client {
                             break;
                         }
 
+                        self.inner.flush().await;
+
                         let new_min = self.inner.rtt_filter.running_min(RTT_WINDOW, Instant::now(), self.inner.connection.stats().rtt.as_nanos() as u64);
                         if new_min != self.inner.rtt_min.load(Ordering::Relaxed) {
                             self.inner.rtt_min.store(new_min, Ordering::Relaxed);
@@ -307,7 +316,7 @@ impl Client {
                     }
 
                     // Outgoing traffic
-                    Some(to_send) = self.out_rx.recv() => {
+                    Some(to_send) = self.out_rx.recv(), if should_send_out => {
                         match to_send {
                             OutgoingData::Stream(packet) => self.inner.send_packet(0, packet).await,
                             OutgoingData::Datagram(datagram) => self.inner.send_datagram(datagram).await,
@@ -546,24 +555,75 @@ impl Inner {
     async fn send_packet(&mut self, stream_id: u64, packet: Packet) {
         let mut buf = BytesMut::new();
         packet.encode_length_delimited(&mut buf).unwrap();
+        self.send_packet_buf(stream_id, buf).await;
+    }
+
+    async fn send_packet_buf(&mut self, stream_id: u64, mut buf: BytesMut) {
         while buf.remaining() > 0 {
-            let written = self.connection.stream_send(stream_id, &buf, false).unwrap();
+            match self.connection.stream_send(stream_id, &buf, false) {
+                Ok(0) => {
+                    self.store_stream_buf(stream_id, buf);
+                    return;
+                }
 
-            if written == 0 {
-                panic!("No progress made");
+                Ok(written) => buf.advance(written),
+
+                Err(quiche::Error::Done) => {
+                    self.store_stream_buf(stream_id, buf);
+                    return;
+                }
+
+                Err(e) => {
+                    panic!("Error while sending packet: {}", e);
+                }
             }
-
-            buf.advance(written);
         }
 
         self.send().await;
     }
 
+    fn store_stream_buf(&mut self, stream_id: u64, buf: BytesMut) {
+        if self.stream_slot.is_some() {
+            panic!("Tried to send packet when slot was full");
+        } else {
+            self.stream_slot = Some((stream_id, buf));
+        }
+    }
+
     async fn send_datagram(&mut self, datagram: Datagram) {
         let mut buf = BytesMut::new();
         datagram.encode(&mut buf).unwrap();
-        self.connection.dgram_send(&buf).unwrap();
+        self.send_datagram_buf(buf).await;
+    }
+
+    async fn send_datagram_buf(&mut self, buf: BytesMut) {
+        match self.connection.dgram_send(&buf) {
+            Err(quiche::Error::Done) => {
+                if self.dgram_slot.is_some() {
+                    panic!("Tried to send datagram while slot was full")
+                } else {
+                    self.dgram_slot = Some(buf);
+                    return;
+                }
+            }
+
+            Err(e) => {
+                panic!("Error while sending datagram: {}", e);
+            }
+
+            Ok(()) => {}
+        }
         self.send().await;
+    }
+
+    async fn flush(&mut self) {
+        if let Some(dgram) = self.dgram_slot.take() {
+            self.send_datagram_buf(dgram).await;
+        }
+
+        if let Some((stream_id, packet)) = self.stream_slot.take() {
+            self.send_packet_buf(stream_id, packet).await;
+        }
     }
 }
 
