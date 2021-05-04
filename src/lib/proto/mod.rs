@@ -1,7 +1,7 @@
 //! A container for automatically generated Protobuf containers from the `prost-build` crate.
 
 #[allow(missing_docs)]
-mod packets;
+pub mod packets;
 
 use bytes::{Buf, BytesMut};
 pub use packets::*;

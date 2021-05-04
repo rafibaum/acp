@@ -294,6 +294,7 @@ impl Client {
                     info.piece_size,
                     self.rtt_min.clone(),
                     self.term_tx.clone(),
+                    info.options.unwrap().integrity,
                 );
 
                 self.incoming
@@ -356,6 +357,7 @@ impl Client {
                     self.out_tx.clone(),
                     rx,
                     self.term_tx.clone(),
+                    download.options.unwrap().integrity,
                 );
 
                 self.outgoing.insert(download.id.clone(), tx);

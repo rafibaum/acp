@@ -6,10 +6,12 @@
 
 use anyhow::Result;
 use bytes::{Buf, BytesMut};
+use clap::ArgMatches;
 use libacp::incoming::Incoming;
 use libacp::mpsc as resizable;
 use libacp::outgoing::Outgoing;
 use libacp::proto::packet::Data;
+use libacp::proto::packets;
 use libacp::proto::{datagram, AcceptDownload, OutgoingData, RequestDownload, SendPiece};
 use libacp::proto::{Datagram, Packet, RequestUpload};
 use libacp::{incoming, outgoing, proto};
@@ -44,14 +46,20 @@ async fn main() -> Result<()> {
     let server = matches.value_of("SERVER").unwrap_or("127.0.0.1:55280");
 
     let command = if let Some(matches) = matches.subcommand_matches("get") {
+        let options = TransferOptions::from_matches(matches);
+
         Command::GetFile {
             local: matches.value_of("DESTINATION").unwrap().to_owned(),
             remote: matches.value_of("SOURCE").unwrap().to_owned(),
+            options,
         }
     } else if let Some(matches) = matches.subcommand_matches("put") {
+        let options = TransferOptions::from_matches(matches);
+
         Command::PutFile {
             local: matches.value_of("SOURCE").unwrap().to_owned(),
             remote: matches.value_of("DESTINATION").unwrap().to_owned(),
+            options,
         }
     } else {
         panic!("No subcommand found!");
@@ -212,7 +220,11 @@ impl Client {
         // Initialised, start processing commands
         while let Some(command) = self.inner.commands.recv().await {
             let handle = match command {
-                Command::PutFile { local, remote } => {
+                Command::PutFile {
+                    local,
+                    remote,
+                    options,
+                } => {
                     let file = File::open(local).await.expect("File not found");
 
                     let mut id = vec![0; 16];
@@ -227,20 +239,36 @@ impl Client {
                         size: file.metadata().await.unwrap().len(),
                         block_size: 2048,
                         piece_size: 1024,
+                        options: Some(packets::TransferOptions {
+                            integrity: options.integrity,
+                        }),
                     }));
                     self.inner.send_packet(0, packet).await;
 
                     let out_tx = self.inner.out_tx.clone();
                     let term_tx = self.inner.term_tx.clone();
 
-                    tokio::spawn(async {
+                    tokio::spawn(async move {
                         let in_rx = start_rx.await.unwrap();
-                        let outgoing = Outgoing::new(id, file, 2048, 1024, out_tx, in_rx, term_tx);
+                        let outgoing = Outgoing::new(
+                            id,
+                            file,
+                            2048,
+                            1024,
+                            out_tx,
+                            in_rx,
+                            term_tx,
+                            options.integrity,
+                        );
                         outgoing.run().await
                     })
                 }
 
-                Command::GetFile { local, remote } => {
+                Command::GetFile {
+                    local,
+                    remote,
+                    options,
+                } => {
                     let file = OpenOptions::new()
                         .read(true)
                         .write(true)
@@ -258,6 +286,9 @@ impl Client {
                     let packet = Packet::new(Data::RequestDownload(RequestDownload {
                         id: id.clone(),
                         filename: remote.into_bytes(),
+                        options: Some(packets::TransferOptions {
+                            integrity: options.integrity,
+                        }),
                     }));
                     self.inner.send_packet(0, packet).await;
 
@@ -265,7 +296,7 @@ impl Client {
                     let rtt_min = self.inner.rtt_min.clone();
                     let term_tx = self.inner.term_tx.clone();
 
-                    tokio::spawn(async {
+                    tokio::spawn(async move {
                         let start = start_rx.await.unwrap();
                         let incoming = Incoming::new(
                             id,
@@ -278,6 +309,7 @@ impl Client {
                             start.info.piece_size,
                             rtt_min,
                             term_tx,
+                            options.integrity,
                         );
                         incoming.run().await
                     })
@@ -629,6 +661,30 @@ impl Inner {
 
 #[derive(Debug)]
 enum Command {
-    GetFile { local: String, remote: String },
-    PutFile { local: String, remote: String },
+    GetFile {
+        local: String,
+        remote: String,
+        options: TransferOptions,
+    },
+    PutFile {
+        local: String,
+        remote: String,
+        options: TransferOptions,
+    },
+}
+
+#[derive(Debug)]
+struct TransferOptions {
+    integrity: bool,
+}
+
+impl TransferOptions {
+    fn from_matches(matches: &ArgMatches) -> Self {
+        let integrity = match matches.value_of("integrity") {
+            Some(val) => val.parse().unwrap(),
+            None => true,
+        };
+
+        TransferOptions { integrity }
+    }
 }

@@ -15,6 +15,13 @@ pub fn build_cli() -> App<'static, 'static> {
             SubCommand::with_name("get")
                 .about("download a file")
                 .arg(
+                    Arg::with_name("integrity")
+                        .short("c")
+                        .long("check")
+                        .help("Whether to perform integrity checking")
+                        .takes_value(true),
+                )
+                .arg(
                     Arg::with_name("SOURCE")
                         .help("File to download")
                         .required(true)
@@ -30,6 +37,13 @@ pub fn build_cli() -> App<'static, 'static> {
         .subcommand(
             SubCommand::with_name("put")
                 .about("upload a file")
+                .arg(
+                    Arg::with_name("integrity")
+                        .short("c")
+                        .long("check")
+                        .help("Whether to perform integrity checking")
+                        .takes_value(true),
+                )
                 .arg(
                     Arg::with_name("SOURCE")
                         .help("File to upload")

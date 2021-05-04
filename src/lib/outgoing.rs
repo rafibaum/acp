@@ -28,7 +28,7 @@ struct Inner {
     piece_size: u32,
     block_size: u64,
     tx: Sender<OutgoingData>,
-    ctx: digest::Context,
+    ctx: Option<digest::Context>,
     lost: BinaryHeap<Reverse<u64>>,
     round: Round,
     round_stall: bool,
@@ -47,7 +47,14 @@ impl Outgoing {
         tx: Sender<OutgoingData>,
         rx: Receiver<IncomingPacket>,
         term_tx: Sender<Terminated>,
+        integrity_check: bool,
     ) -> Self {
+        let ctx = if integrity_check {
+            Some(digest::Context::new(&digest::SHA256))
+        } else {
+            None
+        };
+
         Outgoing {
             inner: Inner {
                 id,
@@ -55,7 +62,7 @@ impl Outgoing {
                 piece_size,
                 block_size: block_size as u64,
                 tx,
-                ctx: digest::Context::new(&digest::SHA256),
+                ctx,
                 lost: BinaryHeap::new(),
                 round: Round::First { piece: 0 },
                 round_stall: false,
@@ -152,7 +159,9 @@ impl Inner {
             }
 
             // Update digest
-            self.ctx.update(&buf);
+            if let Some(ctx) = self.ctx.as_mut() {
+                ctx.update(&buf);
+            }
 
             // Bump piece number
             *piece += 1;
@@ -193,8 +202,10 @@ impl Inner {
     }
 
     async fn finish_block(&mut self, block: u32) {
-        let mut ctx = digest::Context::new(&digest::SHA256);
-        std::mem::swap(&mut ctx, &mut self.ctx);
+        let ctx = match self.ctx.take() {
+            Some(ctx) => ctx,
+            None => return,
+        };
         let checksum = ctx.finish();
 
         let info = Packet::new(packet::Data::BlockInfo(BlockInfo {
@@ -203,6 +214,8 @@ impl Inner {
             checksum: Vec::from(checksum.as_ref()),
         }));
         self.tx.send(OutgoingData::Stream(info)).await.unwrap();
+
+        self.ctx = Some(digest::Context::new(&digest::SHA256));
     }
 
     async fn end_round(&mut self) {

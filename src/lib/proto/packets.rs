@@ -75,6 +75,8 @@ pub struct RequestUpload {
     /// In bytes
     #[prost(uint32, tag = "5")]
     pub piece_size: u32,
+    #[prost(message, optional, tag = "6")]
+    pub options: ::core::option::Option<TransferOptions>,
 }
 #[derive(Clone, PartialEq, ::prost::Message)]
 pub struct AcceptUpload {
@@ -87,6 +89,8 @@ pub struct RequestDownload {
     pub id: ::prost::alloc::vec::Vec<u8>,
     #[prost(bytes = "vec", tag = "2")]
     pub filename: ::prost::alloc::vec::Vec<u8>,
+    #[prost(message, optional, tag = "3")]
+    pub options: ::core::option::Option<TransferOptions>,
 }
 #[derive(Clone, PartialEq, ::prost::Message)]
 pub struct AcceptDownload {
@@ -101,6 +105,11 @@ pub struct AcceptDownload {
     /// In bytes
     #[prost(uint32, tag = "4")]
     pub piece_size: u32,
+}
+#[derive(Clone, PartialEq, ::prost::Message)]
+pub struct TransferOptions {
+    #[prost(bool, tag = "1")]
+    pub integrity: bool,
 }
 #[derive(Clone, PartialEq, ::prost::Message)]
 pub struct BlockInfo {

@@ -44,6 +44,7 @@ message RequestUpload {
   uint64 size = 3;      // In bytes
   uint32 blockSize = 4; // In pieces
   uint32 pieceSize = 5; // In bytes
+  TransferOptions options = 6;
 }
 
 message AcceptUpload {
@@ -53,6 +54,7 @@ message AcceptUpload {
 message RequestDownload {
   bytes id = 1;
   bytes filename = 2;
+  TransferOptions options = 3;
 }
 
 message AcceptDownload {
@@ -60,6 +62,10 @@ message AcceptDownload {
   uint64 size = 2;      // In bytes
   uint32 blockSize = 3; // In pieces
   uint32 pieceSize = 4; // In bytes
+}
+
+message TransferOptions {
+  bool integrity = 1;
 }
 
 message BlockInfo {

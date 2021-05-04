@@ -50,6 +50,7 @@ pub struct Incoming {
     rtt: Arc<AtomicU64>,
     term_tx: Sender<Terminated>,
     window_size: u64,
+    integrity: bool,
 }
 
 struct BlockInfo {
@@ -75,6 +76,7 @@ impl Incoming {
         piece_size: u32,
         rtt: Arc<AtomicU64>,
         term_tx: Sender<Terminated>,
+        integrity: bool,
     ) -> Self {
         let blocks_cap = (file_size / piece_size as u64 + 1) / block_size as u64 + 1;
         let pieces_cap = file_size / piece_size as u64 + 1;
@@ -109,6 +111,7 @@ impl Incoming {
             rtt,
             term_tx,
             window_size: crate::INITIAL_WINDOW_SIZE,
+            integrity,
         }
     }
 
@@ -183,6 +186,15 @@ impl Incoming {
             }
         }
 
+        self.tx
+            .send(OutgoingData::Stream(Packet::new(
+                packet::Data::EndTransfer(EndTransfer {
+                    id: self.id.clone(),
+                }),
+            )))
+            .await
+            .unwrap();
+
         self.term_tx
             .send(Terminated::Incoming(self.id))
             .await
@@ -220,9 +232,11 @@ impl Incoming {
             self.piece_size as u64,
         );
 
-        let result = match packet {
+        match packet {
             // Attach block information as it's received
-            IncomingData::BlockInfo(info) => block.attach_info(info.checksum),
+            IncomingData::BlockInfo(info) => {
+                block.attach_info(info.checksum);
+            }
 
             // Process incoming piece
             IncomingData::Piece(piece) => {
@@ -245,55 +259,62 @@ impl Incoming {
                     self.last_pos = offset;
                 }
 
-                let block_status = block.write_piece(&mut self.file, &piece.data).await;
+                block.write_piece(&mut self.file, &piece.data).await;
                 self.last_pos += piece.data.len() as u64;
 
                 let elapsed = Instant::now() - self.piece_start.unwrap();
                 self.piece_min =
                     self.piece_filter
                         .running_min(PIECE_WINDOW, Instant::now(), elapsed);
-
-                block_status
             }
         };
 
-        // Check if we now have a complete block
-        if let BlockStatus::Done = result {
-            let block_size = (self.block_size * self.piece_size) as u64;
-            let offset = block_num * block_size;
-            if offset != self.last_pos {
-                self.file.seek(SeekFrom::Start(offset)).await.unwrap();
-                self.last_pos = offset;
-            }
+        if block.has_all_pieces() && (block.has_checksum() || !self.integrity) {
+            // Block received
+            self.blocks_received += 1;
+            println!(
+                "Received block {}, done {} of {}",
+                block.num, self.blocks_received, self.num_blocks
+            );
 
-            let verified = block.verify(&mut self.file).await;
-            self.last_pos += block_size;
-
-            if verified {
-                self.blocks_received += 1;
-                println!(
-                    "Verified block {}, done {} of {}",
-                    block.num, self.blocks_received, self.num_blocks
-                );
-
-                if self.blocks_received >= self.num_blocks {
-                    self.tx
-                        .send(OutgoingData::Stream(Packet::new(
-                            packet::Data::EndTransfer(EndTransfer {
-                                id: self.id.clone(),
-                            }),
-                        )))
-                        .await
-                        .unwrap();
-                    return true;
-                }
-            } else {
-                //TODO: Proper checksum mismatch handling
-                panic!("Does not match");
+            if self.blocks_received >= self.num_blocks {
+                return if self.integrity {
+                    self.verify_all_blocks().await
+                } else {
+                    true
+                };
             }
         }
 
         false
+    }
+
+    async fn verify_all_blocks(&mut self) -> bool {
+        let block_size = (self.block_size * self.piece_size) as u64;
+
+        self.file.seek(SeekFrom::Start(0)).await.unwrap();
+
+        for i in 0..self.num_blocks {
+            let block = block(
+                &mut self.blocks,
+                i,
+                self.file_size,
+                self.num_blocks,
+                self.block_size as u64,
+                self.piece_size as u64,
+            );
+
+            let verified = block.verify(&mut self.file).await;
+            self.last_pos += block_size;
+
+            if !verified {
+                panic!("Block {} did not match checksum", i);
+            } else {
+                println!("Verified block {}", i);
+            }
+        }
+
+        true
     }
 
     async fn gc(&mut self) {
@@ -384,28 +405,21 @@ impl BlockInfo {
         }
     }
 
-    async fn write_piece(&mut self, file: &mut BufWriter<File>, data: &[u8]) -> BlockStatus {
+    async fn write_piece(&mut self, file: &mut BufWriter<File>, data: &[u8]) {
         self.received += 1;
         file.write_all(&data).await.unwrap();
-        self.check_done()
     }
 
-    fn attach_info(&mut self, digest: Vec<u8>) -> BlockStatus {
+    fn has_all_pieces(&self) -> bool {
+        self.received >= self.pieces
+    }
+
+    fn attach_info(&mut self, digest: Vec<u8>) {
         self.checksum = Some(digest);
-        self.check_done()
     }
 
-    fn check_done(&self) -> BlockStatus {
-        match &self.checksum {
-            None => BlockStatus::Pending,
-            Some(_) => {
-                if self.received >= self.pieces {
-                    BlockStatus::Done
-                } else {
-                    BlockStatus::Pending
-                }
-            }
-        }
+    fn has_checksum(&self) -> bool {
+        self.checksum.is_some()
     }
 
     async fn verify(&mut self, file: &mut BufWriter<File>) -> bool {
@@ -439,14 +453,6 @@ impl BlockInfo {
 
         value.as_ref() == checksum
     }
-}
-
-/// Completion status of a block.
-enum BlockStatus {
-    /// Block is missing some information or pieces.
-    Pending,
-    /// Block is complete.
-    Done,
 }
 
 /// A packet routed into an incoming transfer.
