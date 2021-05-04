@@ -11,7 +11,7 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
 use std::time::Duration;
 use tokio::fs::File;
-use tokio::io::{AsyncReadExt, AsyncSeekExt, AsyncWriteExt, SeekFrom};
+use tokio::io::{AsyncReadExt, AsyncSeekExt, AsyncWriteExt, BufWriter, SeekFrom};
 use tokio::sync::mpsc::{Receiver, Sender};
 use tokio::time::Instant;
 
@@ -22,7 +22,8 @@ const GC_INTERVAL: u64 = 2;
 /// Type for managing information relating to an incoming file transfer.
 pub struct Incoming {
     id: Vec<u8>,
-    file: File,
+    file: BufWriter<File>,
+    last_pos: u64,
     file_size: u64,
     blocks: HashMap<u64, BlockInfo>,
     /// Number of blocks in this file
@@ -83,7 +84,8 @@ impl Incoming {
 
         Incoming {
             id,
-            file,
+            file: BufWriter::new(file),
+            last_pos: 0,
             file_size,
             blocks: HashMap::with_capacity(blocks_cap as usize),
             num_blocks: blocks_cap,
@@ -238,7 +240,13 @@ impl Incoming {
                     println!("Received piece {}", piece.piece);
                 }
 
-                let block_status = block.write_piece(&mut self.file, offset, &piece.data).await;
+                if self.last_pos != offset {
+                    self.file.seek(SeekFrom::Start(offset)).await.unwrap();
+                    self.last_pos = offset;
+                }
+
+                let block_status = block.write_piece(&mut self.file, &piece.data).await;
+                self.last_pos += piece.data.len() as u64;
 
                 let elapsed = Instant::now() - self.piece_start.unwrap();
                 self.piece_min =
@@ -251,13 +259,17 @@ impl Incoming {
 
         // Check if we now have a complete block
         if let BlockStatus::Done = result {
-            if block
-                .verify(
-                    &mut self.file,
-                    block_num * (self.block_size * self.piece_size) as u64,
-                )
-                .await
-            {
+            let block_size = (self.block_size * self.piece_size) as u64;
+            let offset = block_num * block_size;
+            if offset != self.last_pos {
+                self.file.seek(SeekFrom::Start(offset)).await.unwrap();
+                self.last_pos = offset;
+            }
+
+            let verified = block.verify(&mut self.file).await;
+            self.last_pos += block_size;
+
+            if verified {
                 self.blocks_received += 1;
                 println!(
                     "Verified block {}, done {} of {}",
@@ -372,12 +384,9 @@ impl BlockInfo {
         }
     }
 
-    async fn write_piece(&mut self, file: &mut File, offset: u64, data: &[u8]) -> BlockStatus {
+    async fn write_piece(&mut self, file: &mut BufWriter<File>, data: &[u8]) -> BlockStatus {
         self.received += 1;
-
-        file.seek(SeekFrom::Start(offset)).await.unwrap();
         file.write_all(&data).await.unwrap();
-
         self.check_done()
     }
 
@@ -399,7 +408,7 @@ impl BlockInfo {
         }
     }
 
-    async fn verify(&mut self, file: &mut File, offset: u64) -> bool {
+    async fn verify(&mut self, file: &mut BufWriter<File>) -> bool {
         let checksum = match &self.checksum {
             Some(checksum) => checksum,
             None => return false,
@@ -407,7 +416,6 @@ impl BlockInfo {
 
         let mut ctx = digest::Context::new(&digest::SHA256);
         let mut buf = vec![0; 65535];
-        file.seek(SeekFrom::Start(offset)).await.unwrap();
 
         let mut read = 0;
         loop {

@@ -24,7 +24,7 @@ pub struct Outgoing {
 
 struct Inner {
     id: Vec<u8>,
-    file: PieceFile,
+    file: BufReader<File>,
     piece_size: u32,
     block_size: u64,
     tx: Sender<OutgoingData>,
@@ -51,7 +51,7 @@ impl Outgoing {
         Outgoing {
             inner: Inner {
                 id,
-                file: PieceFile::new(file),
+                file: BufReader::new(file),
                 piece_size,
                 block_size: block_size as u64,
                 tx,
@@ -252,7 +252,6 @@ impl Inner {
                 std::mem::swap(&mut pieces, &mut self.lost);
 
                 println!("Starting next round");
-                self.file.unbuffer();
                 self.round.next(pieces);
 
                 self.round_stall = false;
@@ -302,39 +301,5 @@ impl Round {
             num: next_num,
             pieces,
         }
-    }
-}
-
-enum PieceFile {
-    Unbuffered(File),
-    Buffered(Option<BufReader<File>>),
-}
-
-impl PieceFile {
-    pub fn new(file: File) -> Self {
-        PieceFile::Buffered(Some(BufReader::new(file)))
-    }
-
-    pub async fn read(&mut self, mut buf: &mut [u8]) -> tokio::io::Result<usize> {
-        match self {
-            PieceFile::Unbuffered(file) => file.read(&mut buf).await,
-            PieceFile::Buffered(file) => file.as_mut().unwrap().read(&mut buf).await,
-        }
-    }
-
-    pub async fn seek(&mut self, pos: SeekFrom) -> tokio::io::Result<u64> {
-        match self {
-            PieceFile::Unbuffered(file) => file.seek(pos).await,
-            PieceFile::Buffered(_) => panic!("Cannot seek buffered piece file"),
-        }
-    }
-
-    pub fn unbuffer(&mut self) {
-        let file = match self {
-            PieceFile::Buffered(reader) => reader.take().unwrap().into_inner(),
-            PieceFile::Unbuffered(_) => panic!("File is already unbuffered"),
-        };
-
-        *self = PieceFile::Unbuffered(file)
     }
 }
