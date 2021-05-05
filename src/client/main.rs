@@ -401,7 +401,7 @@ impl Client {
 
 impl Inner {
     async fn send(&mut self) {
-        const PACING_WINDOW: Duration = Duration::from_millis(10);
+        const PACING_WINDOW: Duration = Duration::from_millis(1);
 
         loop {
             let info = match self.connection.send_with_info(&mut self.send_buf) {
