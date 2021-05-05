@@ -151,9 +151,7 @@ impl Router {
             let span = trace_span!("client");
             async move {
                 info!("starting client");
-                if let Err(e) = client.run().await {
-                    eprintln!("Client error: {}", e);
-                }
+                client.run().await;
                 debug!("terminating client");
             }
             .instrument(span)
