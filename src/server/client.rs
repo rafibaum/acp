@@ -46,6 +46,8 @@ pub struct Client {
     term_rx: Receiver<Terminated>,
     rtt_filter: Minmax<Instant, u64>,
     rtt_min: Arc<AtomicU64>,
+    dgram_slot: Option<BytesMut>,
+    stream_slot: Option<(u64, BytesMut)>,
 }
 
 struct IncomingHandle {
@@ -93,27 +95,27 @@ impl Client {
             rtt_filter: Minmax::new(Instant::now(), rtt_min),
             term_tx,
             term_rx,
+            dgram_slot: None,
+            stream_slot: None,
         }
     }
 
     pub async fn run(mut self) {
         self.send().await; // Acknowledge the established connection
         loop {
+            let send_blocked = self.stream_slot.is_some() || self.dgram_slot.is_some();
+
             // Perform incoming actions
             tokio::select! {
                 // Read incoming bytes
-                result = {
-                    poll_socket(&mut self.connection, &mut self.rx)
-                } => {
+                result = poll_socket(&mut self.connection, &mut self.rx) => {
                     if let Ok(bytes) = result {
                         self.recv(bytes).await;
                     }
                 }
 
                 // Send outgoing data
-                Some(data) = {
-                    self.out_rx.recv()
-                } => {
+                Some(data) = self.out_rx.recv(), if !send_blocked => {
                     match data {
                         OutgoingData::Stream(packet) => {
                             self.send_packet(0, packet).await;
@@ -146,6 +148,8 @@ impl Client {
                 debug!("client connection closed");
                 break;
             }
+
+            self.flush().await;
 
             if self.connection.is_established() && !self.connection.is_draining() {
                 let new_min = self.rtt_filter.running_min(
@@ -451,12 +455,27 @@ impl Client {
     async fn send_packet(&mut self, stream_id: u64, packet: Packet) {
         let mut buf = BytesMut::new();
         packet.encode_length_delimited(&mut buf).unwrap();
+        self.send_packet_buf(stream_id, buf).await;
+    }
+
+    async fn send_packet_buf(&mut self, stream_id: u64, mut buf: BytesMut) {
         while buf.remaining() > 0 {
-            buf.advance(
-                self.connection
-                    .stream_send(stream_id, &buf[..], false)
-                    .unwrap(),
-            );
+            let read = match self.connection.stream_send(stream_id, &buf[..], false) {
+                Ok(len) => len,
+                Err(quiche::Error::Done) => {
+                    if self.stream_slot.is_some() {
+                        panic!("Tried sending packet while blocked");
+                    } else {
+                        self.stream_slot = Some((stream_id, buf));
+                        return;
+                    }
+                }
+                Err(e) => {
+                    panic!("Error while sending packet: {}", e);
+                }
+            };
+
+            buf.advance(read);
         }
 
         trace!("packet fully buffered in stream");
@@ -466,8 +485,36 @@ impl Client {
     async fn send_datagram(&mut self, datagram: Datagram) {
         let mut buf = BytesMut::new();
         datagram.encode(&mut buf).unwrap();
-        self.connection.dgram_send(&buf).unwrap();
-        self.send().await
+        self.send_datagram_buf(buf).await;
+    }
+
+    async fn send_datagram_buf(&mut self, buf: BytesMut) {
+        match self.connection.dgram_send(&buf) {
+            Ok(_) => {}
+            Err(quiche::Error::Done) => {
+                if self.dgram_slot.is_some() {
+                    panic!("Tried sending datagram while blocked");
+                } else {
+                    self.dgram_slot = Some(buf);
+                    return;
+                }
+            }
+            Err(e) => {
+                panic!("Error while sending datagram: {}", e);
+            }
+        }
+
+        self.send().await;
+    }
+
+    async fn flush(&mut self) {
+        if let Some(dgram) = self.dgram_slot.take() {
+            self.send_datagram_buf(dgram).await;
+        }
+
+        if let Some((stream, packet)) = self.stream_slot.take() {
+            self.send_packet_buf(stream, packet).await;
+        }
     }
 
     #[tracing::instrument(level = "trace", skip(self))]
