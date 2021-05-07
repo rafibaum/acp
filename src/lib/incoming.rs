@@ -1,5 +1,6 @@
 //! Types for handling incoming file transfers.
 
+use crate::minmax::Minmax;
 use crate::mpsc as resizable;
 use crate::proto::{packet, AckEndRound, EndTransfer, OutgoingData, Packet, SendPiece};
 use crate::{proto, Terminated};
@@ -15,8 +16,8 @@ use tokio::sync::mpsc::{Receiver, Sender};
 use tokio::time::Instant;
 
 const INITIAL_AVG_PIECE_TIME: Duration = Duration::from_millis(1);
+const PIECE_WINDOW: Duration = Duration::from_secs(10);
 const GC_INTERVAL: u64 = 2;
-const BUF_SIZE: usize = 8192;
 
 /// Type for managing information relating to an incoming file transfer.
 pub struct Incoming {
@@ -44,7 +45,8 @@ pub struct Incoming {
     next_gc: Option<Instant>,
     draining_round: Option<u32>,
     piece_start: Option<Instant>,
-    piece_avg: Duration,
+    piece_min: Duration,
+    piece_filter: Minmax<Instant, Duration>,
     rtt: Arc<AtomicU64>,
     term_tx: Sender<Terminated>,
     window_size: u64,
@@ -84,7 +86,7 @@ impl Incoming {
 
         Incoming {
             id,
-            file: BufWriter::with_capacity(BUF_SIZE, file),
+            file: BufWriter::new(file),
             last_pos: 0,
             file_size,
             blocks: HashMap::with_capacity(blocks_cap as usize),
@@ -104,7 +106,8 @@ impl Incoming {
             next_gc: None,
             draining_round: None,
             piece_start: None,
-            piece_avg: INITIAL_AVG_PIECE_TIME,
+            piece_min: INITIAL_AVG_PIECE_TIME,
+            piece_filter: Minmax::new(Instant::now(), INITIAL_AVG_PIECE_TIME),
             rtt,
             term_tx,
             window_size: crate::INITIAL_WINDOW_SIZE,
@@ -260,7 +263,9 @@ impl Incoming {
                 self.last_pos += piece.data.len() as u64;
 
                 let elapsed = Instant::now() - self.piece_start.unwrap();
-                self.piece_avg = (self.piece_avg * 7) / 8 + elapsed / 8;
+                self.piece_min =
+                    self.piece_filter
+                        .running_min(PIECE_WINDOW, Instant::now(), elapsed);
             }
         };
 
@@ -327,7 +332,7 @@ impl Incoming {
         }
 
         let rtt = self.rtt.load(Ordering::Relaxed);
-        let mut window_size = rtt / self.piece_avg.as_nanos() as u64;
+        let mut window_size = rtt / self.piece_min.as_nanos() as u64;
         // Build in a queue of double and assume minimum piece time is half of regular time
         window_size *= 4;
         self.window_size = std::cmp::max(self.window_size, window_size);
