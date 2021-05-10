@@ -35,7 +35,7 @@ async fn main() -> Result<()> {
     config.set_initial_max_stream_data_bidi_local(1000000);
     config.set_initial_max_stream_data_bidi_remote(1000000);
     config.set_initial_max_stream_data_uni(1000000);
-    config.set_max_idle_timeout(30 * 1000);
+    config.set_max_idle_timeout(10 * 1000);
     config.enable_dgram(true, 512, 512);
     config
         .set_cc_algorithm_name(cli.value_of("congestion control").unwrap())

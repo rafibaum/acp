@@ -24,7 +24,7 @@ clap = "2.33"
 futures = "0.3"
 memmap = "0.7"
 prost = "0.7"
-quiche = { git = "https://github.com/rafibaum/quiche", branch = "bbr" }
+quiche = { path = "../quiche" }
 ring = { version = "0.16", features = ["std"] }
 thiserror = "1.0"
 tokio = { version = "1.6", features = ["full"] }
@@ -33,3 +33,6 @@ tracing = "0.1"
 [build-dependencies]
 clap = "2.33"
 prost-build = "0.7.0"
+
+[profile.release]
+debug = 1

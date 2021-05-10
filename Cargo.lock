@@ -534,7 +534,6 @@ dependencies = [
 [[package]]
 name = "quiche"
 version = "0.8.1"
-source = "git+https://github.com/rafibaum/quiche?branch=bbr#fd7cb9b46049605144edf4d4041942e55db2eb43"
 dependencies = [
  "cmake",
  "lazy_static",

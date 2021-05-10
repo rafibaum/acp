@@ -100,7 +100,11 @@ impl Client {
     }
 
     pub async fn run(mut self) {
+        let mut iter_arr = [0; 5];
+        let mut iters = 0;
+
         self.send().await; // Acknowledge the established connection
+        println!("Starting client");
         loop {
             let send_blocked = self.stream_slot.is_some() || self.dgram_slot.is_some();
             let rx = &mut self.rx;
@@ -110,6 +114,7 @@ impl Client {
             tokio::select! {
                 // Read incoming bytes
                 bytes = rx.recv() => {
+                    iter_arr[0] += 1;
                     self.recv(bytes);
                 }
 
@@ -124,11 +129,13 @@ impl Client {
                         None => false
                     }
                 } => {
+                    iter_arr[1] += 1;
                     self.connection.on_timeout();
                 }
 
                 // Send outgoing data
                 Some(data) = self.out_rx.recv(), if !send_blocked => {
+                    iter_arr[2] += 1;
                     match data {
                         OutgoingData::Stream(packet) => {
                             self.send_packet(0, packet).await;
@@ -142,6 +149,7 @@ impl Client {
 
                 // Handle cleanup
                 Some(termination) = self.term_rx.recv() => {
+                    iter_arr[3] += 1;
                     match termination {
                         Terminated::Outgoing(id) => {
                             self.outgoing.remove(&id);
@@ -151,6 +159,11 @@ impl Client {
                             self.incoming.remove(&id);
                         }
                     }
+                }
+
+                _ = tokio::time::sleep(Duration::from_secs(1)) => {
+                    iter_arr[4] += 1;
+                    println!("Awaiting incoming");
                 }
             }
 
@@ -177,7 +190,15 @@ impl Client {
                 self.read_streams().await;
                 self.read_dgrams().await;
             }
+
+            // if iters % 1000 == 0 {
+            //     println!("Client Iters: {:?}", iter_arr);
+            // }
+
+            iters += 1;
         }
+
+        println!("Ending client");
 
         if let Err(_) = self.parent_term.send(self.scid).await {
             error!("client termination channel dropped");
@@ -456,8 +477,11 @@ impl Client {
             datagram::Data::SendPiece(piece) => {
                 if let Some(incoming) = self.incoming.get(&piece.id) {
                     // No need to do anything if this fails, just drop the piece silently
-                    if let Err(TrySendError::Closed(_)) = incoming.piece_tx.try_send(piece) {
-                        panic!("Piece channel closed");
+                    if let Err(e) = incoming.piece_tx.try_send(piece) {
+                        match e {
+                            TrySendError::Full(_) => println!("Piece dropped"),
+                            TrySendError::Closed(_) => panic!("Piece channel closed"),
+                        }
                     }
                 }
             }

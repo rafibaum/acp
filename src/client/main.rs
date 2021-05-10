@@ -81,7 +81,7 @@ async fn main() -> Result<()> {
     config.set_initial_max_stream_data_bidi_local(1000000);
     config.set_initial_max_stream_data_bidi_remote(1000000);
     config.set_initial_max_stream_data_uni(1000000);
-    config.set_max_idle_timeout(30 * 1000);
+    config.set_max_idle_timeout(10 * 1000);
     config.enable_dgram(true, 512, 512);
     config
         .set_cc_algorithm_name(matches.value_of("congestion control").unwrap())
@@ -134,6 +134,7 @@ struct Inner {
     sleep_time: Duration,
     congestion_time: Duration,
     select_time: Duration,
+    sent: u64,
 }
 
 struct OutgoingTransfers {
@@ -209,6 +210,7 @@ impl Client {
                 sleep_time: Duration::from_nanos(0),
                 congestion_time: Duration::from_nanos(0),
                 select_time: Duration::from_nanos(0),
+                sent: 0,
             },
             stream_bufs: HashMap::new(),
             out_rx,
@@ -413,6 +415,10 @@ impl Client {
                             }
                         }
                     }
+
+                    _ = tokio::time::sleep(Duration::from_secs(1)), if !should_send_out => {
+                        println!("Awaiting incoming");
+                    }
                 }
             }
 
@@ -420,8 +426,15 @@ impl Client {
 
             println!("Dgram blocked: {}", self.inner.dgram_blocked);
             println!("Select time: {}ms", self.inner.select_time.as_millis());
+            println!("Sleep time: {}ms", self.inner.sleep_time.as_millis());
+            println!(
+                "Congestion time: {}ms",
+                self.inner.congestion_time.as_millis()
+            );
             println!("Total time: {}ms", elapsed.as_millis());
         }
+
+        println!("Dgram blocked: {}", self.inner.dgram_blocked);
 
         if !self.inner.connection.is_draining() && !self.inner.connection.is_closed() {
             // Commands finished, close connection
@@ -657,6 +670,27 @@ impl Inner {
     }
 
     async fn send_datagram(&mut self, datagram: Datagram) {
+        self.sent += 1;
+        if self.sent % 1000 == 0 {
+            // println!(
+            //     "BBR cons: {:?}, lost: {}, cwnd: {}",
+            //     self.connection.recovery.bbr_state.conservation,
+            //     self.connection.recovery.bbr_state.bytes_lost,
+            //     self.connection.recovery.cwnd(),
+            // )
+
+            // println!(
+            //     "BBR round: {}, cons: {:?}, lost: {}, cwnd: {}, sampling: {}, using: {}, bw: {}",
+            //     self.connection.recovery.bbr_state.round_count,
+            //     self.connection.recovery.bbr_state.conservation,
+            //     self.connection.recovery.bbr_state.bytes_lost,
+            //     self.connection.recovery.cwnd(),
+            //     self.connection.recovery.bbr_state.lt_sampling,
+            //     self.connection.recovery.bbr_state.lt_use_bw,
+            //     self.connection.recovery.bbr_state.lt_bw,
+            // )
+        }
+
         let mut buf = BytesMut::new();
         datagram.encode(&mut buf).unwrap();
         self.send_datagram_buf(buf).await;
@@ -669,6 +703,7 @@ impl Inner {
                     panic!("Tried to send datagram while slot was full")
                 } else {
                     self.dgram_slot = Some(buf);
+                    self.dgram_blocked += 1;
                     return;
                 }
             }

@@ -35,6 +35,7 @@ pub struct Incoming {
     blocks_received: u64,
     highest_piece: u64,
     pieces_received: BitVec,
+    pieces_received_count: u64,
     piece_relief: u32,
     marked_to: u64,
     marked: HashSet<u64>,
@@ -96,6 +97,7 @@ impl Incoming {
             blocks_received: 0,
             highest_piece: 0,
             pieces_received,
+            pieces_received_count: 0,
             piece_relief: 0,
             marked_to: 0,
             marked: HashSet::new(),
@@ -203,6 +205,13 @@ impl Incoming {
 
         let gc_interval = Duration::from_nanos(self.rtt.load(Ordering::Relaxed) / GC_INTERVAL);
         self.next_gc = Some(Instant::now() + gc_interval);
+
+        if self.draining_round.is_some() {
+            println!(
+                "GC Postponed while draining to: {:?}",
+                self.next_gc.unwrap()
+            );
+        }
     }
 
     async fn read_packet(&mut self, packet: IncomingData) -> bool {
@@ -237,6 +246,7 @@ impl Incoming {
             IncomingData::Piece(piece) => {
                 // TODO: Piece bounds check
                 *self.pieces_received.get_mut(piece.piece as usize).unwrap() = true;
+                self.pieces_received_count += 1;
                 self.highest_piece = std::cmp::max(self.highest_piece, piece.piece);
 
                 self.piece_count += 1;
@@ -313,6 +323,10 @@ impl Incoming {
     }
 
     async fn gc(&mut self) {
+        if self.draining_round.is_some() {
+            println!("GC while draining");
+        }
+
         let mut newly_lost = Vec::with_capacity(self.marked.len());
         for marked in &self.marked {
             if !self.pieces_received[*marked as usize] {
@@ -334,6 +348,14 @@ impl Incoming {
 
         self.piece_rx.resize(self.window_size as usize);
         // TODO: Handle window resizing differently
+
+        // println!(
+        //     "Window size: {}, piece_avg: {}, received: {}, lost: {}",
+        //     self.window_size,
+        //     piece_avg.as_nanos(),
+        //     self.pieces_received_count,
+        //     self.lost.len()
+        // );
 
         let update = proto::ControlUpdate {
             id: self.id.clone(),

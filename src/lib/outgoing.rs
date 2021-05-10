@@ -80,10 +80,17 @@ impl Outgoing {
     /// Runs an outgoing file transfer.
     pub async fn run(mut self) {
         loop {
-            if self.inner.round_stall || self.inner.pieces_in_flight >= self.inner.window_size {
+            let flow_blocked = self.inner.pieces_in_flight >= self.inner.window_size;
+
+            if self.inner.round_stall || flow_blocked {
+                println!(
+                    "Now awaiting acknowledgement, round: {}, flow: {}",
+                    self.inner.round_stall, flow_blocked
+                );
                 if self.await_update().await {
                     break;
                 }
+                println!("Unblocked");
             } else {
                 if let Some(true) = self.await_update().now_or_never() {
                     // Transfer finished
@@ -168,6 +175,11 @@ impl Inner {
             piece: piece_num,
             data: buf,
         }));
+
+        if piece_num % 1000 == 0 {
+            println!("Sending piece {}", piece_num);
+        }
+
         self.tx.send(OutgoingData::Datagram(piece)).await.unwrap();
         self.pieces_in_flight += 1;
 
