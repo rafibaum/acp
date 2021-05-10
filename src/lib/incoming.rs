@@ -1,6 +1,5 @@
 //! Types for handling incoming file transfers.
 
-use crate::minmax::Minmax;
 use crate::mpsc as resizable;
 use crate::proto::{packet, AckEndRound, EndTransfer, OutgoingData, Packet, SendPiece};
 use crate::{proto, Terminated};
@@ -15,8 +14,6 @@ use tokio::io::{AsyncReadExt, AsyncSeekExt, AsyncWriteExt, BufWriter, SeekFrom};
 use tokio::sync::mpsc::{Receiver, Sender};
 use tokio::time::Instant;
 
-const INITIAL_AVG_PIECE_TIME: Duration = Duration::from_millis(1);
-const PIECE_WINDOW: Duration = Duration::from_secs(10);
 const GC_INTERVAL: u64 = 2;
 
 /// Type for managing information relating to an incoming file transfer.
@@ -45,8 +42,8 @@ pub struct Incoming {
     next_gc: Option<Instant>,
     draining_round: Option<u32>,
     piece_start: Option<Instant>,
-    piece_min: Duration,
-    piece_filter: Minmax<Instant, Duration>,
+    piece_time: Duration,
+    piece_count: u64,
     rtt: Arc<AtomicU64>,
     term_tx: Sender<Terminated>,
     window_size: u64,
@@ -106,8 +103,8 @@ impl Incoming {
             next_gc: None,
             draining_round: None,
             piece_start: None,
-            piece_min: INITIAL_AVG_PIECE_TIME,
-            piece_filter: Minmax::new(Instant::now(), INITIAL_AVG_PIECE_TIME),
+            piece_time: Duration::from_nanos(0),
+            piece_count: 0,
             rtt,
             term_tx,
             window_size: crate::INITIAL_WINDOW_SIZE,
@@ -138,7 +135,6 @@ impl Incoming {
                         None => false,
                     }
                 }, if !is_draining => {
-                    self.next_gc = None;
                     self.gc().await;
                 }
 
@@ -180,7 +176,6 @@ impl Incoming {
                         None => false,
                     }
                 }, if is_draining => {
-                    self.next_gc = None;
                     self.gc().await;
                 }
             }
@@ -244,6 +239,7 @@ impl Incoming {
                 *self.pieces_received.get_mut(piece.piece as usize).unwrap() = true;
                 self.highest_piece = std::cmp::max(self.highest_piece, piece.piece);
 
+                self.piece_count += 1;
                 if !self.lost.contains(&piece.piece) {
                     // Lost packets already count towards window relief, so don't double count
                     self.piece_relief += 1;
@@ -262,10 +258,9 @@ impl Incoming {
                 block.write_piece(&mut self.file, &piece.data).await;
                 self.last_pos += piece.data.len() as u64;
 
-                let elapsed = Instant::now() - self.piece_start.unwrap();
-                self.piece_min =
-                    self.piece_filter
-                        .running_min(PIECE_WINDOW, Instant::now(), elapsed);
+                let now = Instant::now();
+                let elapsed = now - self.piece_start.unwrap();
+                self.piece_time += elapsed;
             }
         };
 
@@ -332,10 +327,13 @@ impl Incoming {
         }
 
         let rtt = self.rtt.load(Ordering::Relaxed);
-        let mut window_size = rtt / self.piece_min.as_nanos() as u64;
-        // Build in a queue of double and assume minimum piece time is half of regular time
-        window_size *= 4;
-        self.window_size = std::cmp::max(self.window_size, window_size);
+
+        let piece_avg = Duration::new(
+            self.piece_time.as_secs() / self.piece_count,
+            (self.piece_time.subsec_nanos() as u64 / self.piece_count) as u32,
+        );
+        let window_size = rtt / piece_avg.as_nanos() as u64;
+        self.window_size = std::cmp::max(self.window_size, window_size * 2);
 
         self.piece_rx.resize(self.window_size as usize);
         // TODO: Handle window resizing differently
@@ -368,6 +366,8 @@ impl Incoming {
         }
 
         self.marked_to = self.highest_piece;
+
+        self.next_gc = None;
 
         if !self.marked.is_empty() {
             self.schedule_gc();
