@@ -1,13 +1,13 @@
 use crate::router;
-use anyhow::{Context, Result};
+use anyhow::Context;
 use bytes::{Buf, BytesMut};
 use libacp::mpsc as resizable;
+use libacp::proto;
 use libacp::proto::{
     datagram, packet, AcceptDownload, AcceptUpload, OutgoingData, SendPiece, StartBenchmark,
 };
 use libacp::proto::{Datagram, Packet, Ping};
 use libacp::{incoming, outgoing};
-use libacp::{proto, AcpError};
 use libacp::{Minmax, Terminated};
 use prost::Message;
 use quiche::ConnectionId;
@@ -22,7 +22,6 @@ use tokio::net::UdpSocket;
 use tokio::sync::mpsc;
 use tokio::sync::mpsc::error::TrySendError;
 use tokio::sync::mpsc::{Receiver, Sender};
-use tokio::time::timeout;
 use tracing::{debug, error, trace};
 
 const RTT_WINDOW: Duration = Duration::from_secs(10);
@@ -104,14 +103,28 @@ impl Client {
         self.send().await; // Acknowledge the established connection
         loop {
             let send_blocked = self.stream_slot.is_some() || self.dgram_slot.is_some();
+            let rx = &mut self.rx;
+            let timeout = self.connection.timeout();
 
             // Perform incoming actions
             tokio::select! {
                 // Read incoming bytes
-                result = poll_socket(&mut self.connection, &mut self.rx) => {
-                    if let Ok(bytes) = result {
-                        self.recv(bytes).await;
+                bytes = rx.recv() => {
+                    self.recv(bytes).await;
+                }
+
+                // Wait for timeout
+                true = async {
+                    match timeout {
+                        Some(timeout) => {
+                            tokio::time::sleep(timeout).await;
+                            true
+                        }
+
+                        None => false
                     }
+                } => {
+                    self.connection.on_timeout();
                 }
 
                 // Send outgoing data
@@ -565,25 +578,6 @@ impl Client {
             }
         }
     }
-}
-
-async fn poll_socket(
-    connection: &mut quiche::Connection,
-    rx: &mut Receiver<BytesMut>,
-) -> Result<Option<BytesMut>> {
-    let result = match connection.timeout() {
-        Some(duration) => match timeout(duration, rx.recv()).await {
-            Ok(bytes) => bytes,
-            Err(_) => {
-                trace!("timeout lapsed");
-                connection.on_timeout();
-                return Err(AcpError::TimeoutLapsed.into());
-            }
-        },
-        None => rx.recv().await,
-    };
-
-    Ok(result)
 }
 
 #[derive(Debug)]

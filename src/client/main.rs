@@ -205,6 +205,7 @@ impl Client {
         // Initialise connection
         self.inner.send().await;
         loop {
+            // TODO: Timeout
             self.inner.recv().await;
             self.inner.send().await;
 
@@ -322,6 +323,7 @@ impl Client {
             loop {
                 let should_send_out =
                     self.inner.dgram_slot.is_none() && self.inner.stream_slot.is_none();
+                let timeout = self.inner.connection.timeout();
 
                 tokio::select! {
                     // Command finished
@@ -345,6 +347,28 @@ impl Client {
 
                         self.read_streams().await;
                         self.inner.read_dgrams().await;
+                    }
+
+                    // Timeout
+                    true = async {
+                        match timeout {
+                            Some(timeout) => {
+                                tokio::time::sleep(timeout).await;
+                                true
+                            }
+
+                            None => false
+                        }
+                    } => {
+                        self.inner.connection.on_timeout();
+                        self.inner.send().await;
+
+                        if self.inner.connection.is_closed() || self.inner.connection.is_draining() {
+                            // Connection ending
+                            break;
+                        }
+
+                        self.inner.flush().await;
                     }
 
                     // Outgoing traffic
@@ -378,6 +402,7 @@ impl Client {
         }
 
         loop {
+            // TODO: Timeout
             self.inner.recv().await;
             self.inner.send().await;
 
@@ -428,35 +453,13 @@ impl Inner {
     }
 
     async fn recv(&mut self) {
-        // Splitting borrows for select
-        let recv_buf = &mut self.recv_buf;
-        let connection = &mut self.connection;
+        let len = self.socket.recv(&mut self.recv_buf).await.unwrap();
+        let mut to_read = &mut self.recv_buf[..len];
 
-        tokio::select! {
-            // Received bytes
-            len = self.socket.recv(recv_buf) => {
-                let len = len.unwrap();
-                let mut to_read = &mut self.recv_buf[..len];
-
-                while !to_read.is_empty() {
-                    //TODO: Backpressure
-                    let read = self.connection.recv(to_read).unwrap();
-                    to_read = &mut to_read[read..];
-                }
-            }
-
-            // Timeout
-            true = async {
-                let timeout = match connection.timeout() {
-                    Some(timeout) => timeout,
-                    None => return false, // Disable branch, wait for packets
-                };
-
-                tokio::time::sleep(timeout).await;
-                true // Timeout occurred
-            } => {
-                self.connection.on_timeout();
-            }
+        while !to_read.is_empty() {
+            //TODO: Backpressure
+            let read = self.connection.recv(to_read).unwrap();
+            to_read = &mut to_read[read..];
         }
     }
 
