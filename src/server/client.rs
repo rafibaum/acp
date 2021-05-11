@@ -474,7 +474,18 @@ impl Client {
     async fn send_packet_buf(&mut self, stream_id: u64, mut buf: BytesMut) {
         while buf.remaining() > 0 {
             let read = match self.connection.stream_send(stream_id, &buf[..], false) {
+                // Same as done
+                Ok(0) => {
+                    if self.stream_slot.is_some() {
+                        panic!("Tried sending packet while blocked");
+                    } else {
+                        self.stream_slot = Some((stream_id, buf));
+                        return;
+                    }
+                }
+
                 Ok(len) => len,
+
                 Err(quiche::Error::Done) => {
                     if self.stream_slot.is_some() {
                         panic!("Tried sending packet while blocked");
@@ -483,6 +494,7 @@ impl Client {
                         return;
                     }
                 }
+
                 Err(e) => {
                     panic!("Error while sending packet: {}", e);
                 }
