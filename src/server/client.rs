@@ -110,7 +110,7 @@ impl Client {
             tokio::select! {
                 // Read incoming bytes
                 bytes = rx.recv() => {
-                    self.recv(bytes).await;
+                    self.recv(bytes);
                 }
 
                 // Wait for timeout
@@ -558,7 +558,7 @@ impl Client {
     }
 
     #[tracing::instrument(level = "trace", skip(self, bytes))]
-    async fn recv(&mut self, bytes: Option<BytesMut>) {
+    fn recv(&mut self, bytes: Option<BytesMut>) {
         let mut bytes = match bytes {
             Some(bytes) => bytes,
             None => {
