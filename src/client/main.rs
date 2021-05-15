@@ -130,6 +130,10 @@ struct Inner {
     dgram_slot: Option<BytesMut>,
     stream_slot: Option<(u64, BytesMut)>,
     recv_info: RecvInfo,
+    dgram_blocked: u64,
+    sleep_time: Duration,
+    congestion_time: Duration,
+    select_time: Duration,
 }
 
 struct OutgoingTransfers {
@@ -201,6 +205,10 @@ impl Client {
                 dgram_slot: None,
                 stream_slot: None,
                 recv_info: RecvInfo { from: bound_addr },
+                dgram_blocked: 0,
+                sleep_time: Duration::from_nanos(0),
+                congestion_time: Duration::from_nanos(0),
+                select_time: Duration::from_nanos(0),
             },
             stream_bufs: HashMap::new(),
             out_rx,
@@ -326,11 +334,14 @@ impl Client {
 
             tokio::pin!(handle);
 
+            let start = Instant::now();
+
             // Process network traffic until command finished
             loop {
                 let should_send_out =
                     self.inner.dgram_slot.is_none() && self.inner.stream_slot.is_none();
                 let timeout = self.inner.connection.timeout();
+                let start = Instant::now();
 
                 tokio::select! {
                     // Command finished
@@ -338,6 +349,7 @@ impl Client {
 
                     // Incoming traffic
                     _ = self.inner.recv() => {
+                        self.inner.select_time += start.elapsed();
                         self.inner.send().await;
 
                         if self.inner.connection.is_closed() || self.inner.connection.is_draining() {
@@ -367,6 +379,7 @@ impl Client {
                             None => false
                         }
                     } => {
+                        self.inner.select_time += start.elapsed();
                         self.inner.connection.on_timeout();
                         self.inner.send().await;
 
@@ -380,6 +393,7 @@ impl Client {
 
                     // Outgoing traffic
                     Some(to_send) = self.out_rx.recv(), if should_send_out => {
+                        self.inner.select_time += start.elapsed();
                         match to_send {
                             OutgoingData::Stream(packet) => self.inner.send_packet(0, packet).await,
                             OutgoingData::Datagram(datagram) => self.inner.send_datagram(datagram).await,
@@ -388,6 +402,7 @@ impl Client {
 
                     // Cleanup
                     Some(termination) = self.term_rx.recv() => {
+                        self.inner.select_time += start.elapsed();
                         match termination {
                             Terminated::Incoming(id) => {
                                 self.inner.incoming.transfers.remove(&id);
@@ -400,6 +415,12 @@ impl Client {
                     }
                 }
             }
+
+            let elapsed = Instant::now() - start;
+
+            println!("Dgram blocked: {}", self.inner.dgram_blocked);
+            println!("Select time: {}ms", self.inner.select_time.as_millis());
+            println!("Total time: {}ms", elapsed.as_millis());
         }
 
         if !self.inner.connection.is_draining() && !self.inner.connection.is_closed() {
@@ -444,9 +465,12 @@ impl Inner {
 
             let (len, info) = info;
 
-            if let Some(lapsed) = info.at.checked_duration_since(Instant::now()) {
+            let now = Instant::now();
+            if let Some(lapsed) = info.at.checked_duration_since(now) {
                 if lapsed > PACING_WINDOW {
+                    self.congestion_time += lapsed;
                     tokio::time::sleep_until(info.at.into()).await;
+                    self.sleep_time += now.elapsed();
                 }
             }
 
