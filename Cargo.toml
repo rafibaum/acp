@@ -25,6 +25,7 @@ futures = "0.3"
 prost = "0.7"
 quiche = { git = "https://github.com/rafibaum/quiche", branch = "bbr" }
 ring = { version = "0.16", features = ["std"] }
+spin_sleep = "1.0"
 thiserror = "1.0"
 tokio = { git = "https://github.com/tokio-rs/tokio", features = ["full"] }
 tracing = "0.1"

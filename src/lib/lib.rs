@@ -11,6 +11,7 @@ pub mod incoming;
 mod minmax;
 pub mod mpsc;
 pub mod outgoing;
+pub mod pacing;
 pub mod proto;
 
 pub const INITIAL_WINDOW_SIZE: u64 = 4;

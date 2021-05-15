@@ -20,6 +20,7 @@ use prost::Message;
 use quiche::{CongestionControlAlgorithm, Connection, ConnectionId};
 use ring::rand::{SecureRandom, SystemRandom};
 use std::collections::HashMap;
+use std::net::{SocketAddr, ToSocketAddrs};
 use std::pin::Pin;
 use std::sync::atomic::AtomicU64;
 use std::sync::atomic::Ordering;
@@ -92,7 +93,13 @@ async fn main() -> Result<()> {
 
     //TODO: Adjust buffer sizes
     let (tx, rx) = mpsc::channel(32);
-    let client = Client::new(conn, sock, rx, rng);
+    let client = Client::new(
+        conn,
+        sock,
+        server.to_socket_addrs().unwrap().next().unwrap(),
+        rx,
+        rng,
+    );
 
     tx.send(command).await.unwrap();
     std::mem::drop(tx);
@@ -111,8 +118,7 @@ struct Client {
 
 struct Inner {
     connection: Pin<Box<Connection>>,
-    socket: UdpSocket,
-    send_buf: BytesMut,
+    socket: Arc<UdpSocket>,
     recv_buf: BytesMut,
     commands: Receiver<Command>,
     rng: SystemRandom,
@@ -125,6 +131,8 @@ struct Inner {
     term_tx: Sender<Terminated>,
     dgram_slot: Option<BytesMut>,
     stream_slot: Option<(u64, BytesMut)>,
+    out_slot: Option<(BytesMut, Instant)>,
+    pacer: Sender<(BytesMut, Instant)>,
 }
 
 struct OutgoingTransfers {
@@ -153,12 +161,10 @@ impl Client {
     pub fn new(
         connection: Pin<Box<Connection>>,
         socket: UdpSocket,
+        addr: SocketAddr,
         commands: Receiver<Command>,
         rng: SystemRandom,
     ) -> Self {
-        let mut send_buf = BytesMut::with_capacity(65535);
-        send_buf.resize(65535, 0);
-
         let mut recv_buf = BytesMut::with_capacity(65535);
         recv_buf.resize(65535, 0);
 
@@ -171,11 +177,13 @@ impl Client {
 
         let rtt = connection.stats().rtt.as_nanos() as u64;
 
+        let socket = Arc::new(socket);
+        let pacer = libacp::pacing::spawn_pacer(socket.clone(), addr);
+
         Client {
             inner: Inner {
                 connection,
                 socket,
-                send_buf,
                 recv_buf,
                 commands,
                 rng,
@@ -194,6 +202,8 @@ impl Client {
                 term_tx,
                 dgram_slot: None,
                 stream_slot: None,
+                out_slot: None,
+                pacer,
             },
             stream_bufs: HashMap::new(),
             out_rx,
@@ -321,8 +331,9 @@ impl Client {
 
             // Process network traffic until command finished
             loop {
-                let should_send_out =
-                    self.inner.dgram_slot.is_none() && self.inner.stream_slot.is_none();
+                let should_send_out = self.inner.dgram_slot.is_none()
+                    && self.inner.stream_slot.is_none()
+                    && self.inner.out_slot.is_none();
                 let timeout = self.inner.connection.timeout();
 
                 tokio::select! {
@@ -426,28 +437,41 @@ impl Client {
 
 impl Inner {
     async fn send(&mut self) {
-        const PACING_WINDOW: Duration = Duration::from_millis(1);
+        if let Some((buf, send_time)) = self.out_slot.take() {
+            match self.pacer.try_send((buf, send_time)) {
+                Ok(()) => {}
+                Err(TrySendError::Full(msg)) => {
+                    self.out_slot = Some(msg);
+                    return;
+                }
+                Err(TrySendError::Closed(_)) => {
+                    panic!("Tracer closed");
+                }
+            }
+        }
 
         loop {
-            let info = match self.connection.send_with_info(&mut self.send_buf) {
+            let mut buf = BytesMut::new();
+            buf.resize(self.connection.max_send_udp_payload_size(), 0);
+
+            let info = match self.connection.send_with_info(&mut buf) {
                 Ok(info) => info,
                 Err(quiche::Error::Done) => return,
                 err => err.unwrap(),
             };
 
             let (len, info) = info;
+            buf.truncate(len);
 
-            if let Some(lapsed) = info.send_time.checked_duration_since(Instant::now()) {
-                if lapsed > PACING_WINDOW {
-                    tokio::time::sleep_until(info.send_time.into()).await;
+            match self.pacer.try_send((buf, info.send_time)) {
+                Ok(()) => {}
+                Err(TrySendError::Full(msg)) => {
+                    self.out_slot = Some(msg);
+                    return;
                 }
-            }
-
-            let mut to_send = &self.send_buf[..len];
-
-            while !to_send.is_empty() {
-                let sent = self.socket.send(&to_send).await.unwrap();
-                to_send = &to_send[sent..];
+                Err(TrySendError::Closed(_)) => {
+                    panic!("Tracer closed");
+                }
             }
         }
     }
