@@ -351,18 +351,20 @@ impl Incoming {
 
         self.piece_relief = 0;
 
-        let range = match self.draining_round {
-            Some(_) => &self.pieces_received[(self.marked_to as usize)..],
-            None => &self.pieces_received[(self.marked_to as usize)..(self.highest_piece as usize)],
+        let mark_to = match self.draining_round {
+            Some(_) => self.pieces_received.len(),
+            None => self.highest_piece as usize,
         };
+
+        let range = &self.pieces_received[(self.marked_to as usize)..mark_to];
 
         for (piece, received) in range.iter().enumerate() {
             if !received {
-                self.marked.insert(self.marked_to + (piece as u64));
+                self.marked.insert(self.marked_to + piece as u64);
             }
         }
 
-        self.marked_to = self.highest_piece;
+        self.marked_to = mark_to as u64;
 
         self.next_gc = None;
 
