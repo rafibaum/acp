@@ -17,9 +17,10 @@ use libacp::proto::{Datagram, Packet, RequestUpload};
 use libacp::{incoming, outgoing, proto};
 use libacp::{Minmax, Terminated};
 use prost::Message;
-use quiche::{CongestionControlAlgorithm, Connection, ConnectionId};
+use quiche::{CongestionControlAlgorithm, Connection, ConnectionId, RecvInfo};
 use ring::rand::{SecureRandom, SystemRandom};
 use std::collections::HashMap;
+use std::net::{SocketAddr, ToSocketAddrs};
 use std::pin::Pin;
 use std::sync::atomic::AtomicU64;
 use std::sync::atomic::Ordering;
@@ -66,6 +67,7 @@ async fn main() -> Result<()> {
     };
 
     let sock = UdpSocket::bind("0.0.0.0:55281").await.unwrap();
+    let server = server.to_socket_addrs().unwrap().next().unwrap();
     sock.connect(server).await.unwrap();
 
     let mut config = quiche::Config::new(quiche::PROTOCOL_VERSION).unwrap();
@@ -88,11 +90,11 @@ async fn main() -> Result<()> {
     rng.fill(&mut scid).unwrap();
     let scid = ConnectionId::from_vec(scid);
 
-    let conn = quiche::connect(None, &scid, &mut config).unwrap();
+    let conn = quiche::connect(None, &scid, server, &mut config).unwrap();
 
     //TODO: Adjust buffer sizes
     let (tx, rx) = mpsc::channel(32);
-    let client = Client::new(conn, sock, rx, rng);
+    let client = Client::new(conn, sock, rx, rng, server);
 
     tx.send(command).await.unwrap();
     std::mem::drop(tx);
@@ -125,6 +127,7 @@ struct Inner {
     term_tx: Sender<Terminated>,
     dgram_slot: Option<BytesMut>,
     stream_slot: Option<(u64, BytesMut)>,
+    recv_info: RecvInfo,
 }
 
 struct OutgoingTransfers {
@@ -155,6 +158,7 @@ impl Client {
         socket: UdpSocket,
         commands: Receiver<Command>,
         rng: SystemRandom,
+        bound_addr: SocketAddr,
     ) -> Self {
         let mut send_buf = BytesMut::with_capacity(65535);
         send_buf.resize(65535, 0);
@@ -194,6 +198,7 @@ impl Client {
                 term_tx,
                 dgram_slot: None,
                 stream_slot: None,
+                recv_info: RecvInfo { from: bound_addr },
             },
             stream_bufs: HashMap::new(),
             out_rx,
@@ -429,7 +434,7 @@ impl Inner {
         const PACING_WINDOW: Duration = Duration::from_millis(1);
 
         loop {
-            let info = match self.connection.send_with_info(&mut self.send_buf) {
+            let info = match self.connection.send(&mut self.send_buf) {
                 Ok(info) => info,
                 Err(quiche::Error::Done) => return,
                 err => err.unwrap(),
@@ -437,9 +442,9 @@ impl Inner {
 
             let (len, info) = info;
 
-            if let Some(lapsed) = info.send_time.checked_duration_since(Instant::now()) {
+            if let Some(lapsed) = info.at.checked_duration_since(Instant::now()) {
                 if lapsed > PACING_WINDOW {
-                    tokio::time::sleep_until(info.send_time.into()).await;
+                    tokio::time::sleep_until(info.at.into()).await;
                 }
             }
 
@@ -458,7 +463,7 @@ impl Inner {
 
         while !to_read.is_empty() {
             //TODO: Backpressure
-            let read = self.connection.recv(to_read).unwrap();
+            let read = self.connection.recv(to_read, self.recv_info).unwrap();
             to_read = &mut to_read[read..];
         }
     }

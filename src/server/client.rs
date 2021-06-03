@@ -10,7 +10,7 @@ use libacp::proto::{Datagram, Packet, Ping};
 use libacp::{incoming, outgoing};
 use libacp::{Minmax, Terminated};
 use prost::Message;
-use quiche::ConnectionId;
+use quiche::{ConnectionId, RecvInfo};
 use std::collections::HashMap;
 use std::net::SocketAddr;
 use std::pin::Pin;
@@ -30,7 +30,7 @@ pub struct Client {
     socket: Arc<UdpSocket>,
     addr: SocketAddr,
     connection: Pin<Box<quiche::Connection>>,
-    rx: Receiver<BytesMut>,
+    rx: Receiver<(BytesMut, RecvInfo)>,
     scid: ConnectionId<'static>,
     parent_term: Sender<ConnectionId<'static>>,
     send_buf: BytesMut,
@@ -59,7 +59,7 @@ impl Client {
         socket: Arc<UdpSocket>,
         addr: SocketAddr,
         connection: Pin<Box<quiche::Connection>>,
-        rx: Receiver<BytesMut>,
+        rx: Receiver<(BytesMut, RecvInfo)>,
         scid: ConnectionId<'static>,
         parent_term: Sender<ConnectionId<'static>>,
     ) -> Self {
@@ -545,7 +545,7 @@ impl Client {
     #[tracing::instrument(level = "trace", skip(self))]
     async fn send(&mut self) {
         loop {
-            let len = match self.connection.send(&mut self.send_buf) {
+            let (len, _) = match self.connection.send(&mut self.send_buf) {
                 Ok(len) => len,
                 Err(quiche::Error::Done) => {
                     return;
@@ -570,17 +570,20 @@ impl Client {
     }
 
     #[tracing::instrument(level = "trace", skip(self, bytes))]
-    fn recv(&mut self, bytes: Option<BytesMut>) {
-        let mut bytes = match bytes {
+    fn recv(&mut self, bytes: Option<(BytesMut, RecvInfo)>) {
+        let bytes = match bytes {
             Some(bytes) => bytes,
             None => {
                 error!("client input channel dropped before client could safely terminate");
                 panic!("client input channel dropped before client could safely terminate");
             }
         };
+        let (bytes, info) = bytes;
+        let mut bytes = bytes;
+
         trace!(len = bytes.len(), "client received bytes");
 
-        match self.connection.recv(&mut bytes) {
+        match self.connection.recv(&mut bytes, info) {
             Ok(len) => {
                 trace!(read = len, total = bytes.len(), "QUIC accepted input bytes");
             }

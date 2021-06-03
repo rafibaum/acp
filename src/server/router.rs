@@ -1,7 +1,7 @@
 use crate::client::Client;
 use anyhow::{Context, Result};
 use bytes::BytesMut;
-use quiche::ConnectionId;
+use quiche::{ConnectionId, RecvInfo};
 use ring::rand::SecureRandom;
 use std::collections::HashMap;
 use std::net::SocketAddr;
@@ -23,7 +23,7 @@ pub struct Router {
 }
 
 struct Handle {
-    tx: Sender<BytesMut>,
+    tx: Sender<(BytesMut, RecvInfo)>,
 }
 
 impl Router {
@@ -89,13 +89,16 @@ impl Router {
 
         if let Err(err) = match self.handles.get(&header.dcid) {
             Some(handle) => {
-                match handle.tx.try_send(buf) {
+                let info = RecvInfo { from: addr };
+
+                match handle.tx.try_send((buf, info)) {
                     Ok(()) => {
                         trace!(size = len, "datagram passed to client handle");
                         Ok(())
                     }
                     Err(TrySendError::Closed(buf)) => {
                         // Client dropped, run a handshake instead
+                        let (buf, _) = buf;
                         self.handshake(addr, &header, buf)
                     }
                     Err(TrySendError::Full(_)) => {
@@ -130,10 +133,12 @@ impl Router {
         self.rng.fill(&mut scid).unwrap(); // Rng should always succeed
         let scid = ConnectionId::from_vec(scid);
 
-        let (tx, rx) = channel(32);
-        tx.try_send(buf).unwrap(); // Receiver is in scope
+        let info = RecvInfo { from: addr };
 
-        let connection = quiche::accept(&scid, None, &mut self.quic_config)
+        let (tx, rx) = channel(32);
+        tx.try_send((buf, info)).unwrap(); // Receiver is in scope
+
+        let connection = quiche::accept(&scid, None, addr, &mut self.quic_config)
             .context("Failed to initialise QUIC connection to client")?;
         let handle = Handle::new(tx);
         self.handles.insert(scid.clone(), handle);
@@ -163,7 +168,7 @@ impl Router {
 }
 
 impl Handle {
-    fn new(tx: Sender<BytesMut>) -> Self {
+    fn new(tx: Sender<(BytesMut, RecvInfo)>) -> Self {
         Handle { tx }
     }
 }
