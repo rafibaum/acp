@@ -10,7 +10,6 @@ mod router;
 
 use crate::router::Router;
 use anyhow::{Context, Result};
-use quiche::CongestionControlAlgorithm;
 use thiserror::Error;
 
 /// Server's main function. Starts the router and manages top-level error handling.
@@ -18,7 +17,7 @@ use thiserror::Error;
 async fn main() -> Result<()> {
     let cli = cli::build_cli().get_matches();
 
-    let bind_addr = cli.value_of("bind").unwrap_or("127.0.0.1:55280");
+    let bind_addr = cli.value_of("bind").unwrap();
 
     let mut config = quiche::Config::new(quiche::PROTOCOL_VERSION).unwrap();
     config.set_application_protos(b"\x07acp/0.1").unwrap();
@@ -38,7 +37,9 @@ async fn main() -> Result<()> {
     config.set_initial_max_stream_data_uni(1000000);
     config.set_max_idle_timeout(30 * 1000);
     config.enable_dgram(true, 512, 512);
-    config.set_cc_algorithm(CongestionControlAlgorithm::BBR);
+    config
+        .set_cc_algorithm_name(cli.value_of("congestion control").unwrap())
+        .unwrap();
 
     let router = Router::new(bind_addr, config).await?;
     router.run().await

@@ -17,7 +17,7 @@ use libacp::proto::{Datagram, Packet, RequestUpload};
 use libacp::{incoming, outgoing, proto};
 use libacp::{Minmax, Terminated};
 use prost::Message;
-use quiche::{CongestionControlAlgorithm, Connection, ConnectionId, RecvInfo};
+use quiche::{Connection, ConnectionId, RecvInfo};
 use ring::rand::{SecureRandom, SystemRandom};
 use std::collections::HashMap;
 use std::net::{SocketAddr, ToSocketAddrs};
@@ -83,7 +83,9 @@ async fn main() -> Result<()> {
     config.set_initial_max_stream_data_uni(1000000);
     config.set_max_idle_timeout(30 * 1000);
     config.enable_dgram(true, 512, 512);
-    config.set_cc_algorithm(CongestionControlAlgorithm::BBR);
+    config
+        .set_cc_algorithm_name(matches.value_of("congestion control").unwrap())
+        .unwrap();
 
     let rng = ring::rand::SystemRandom::new();
     let mut scid = vec![0; quiche::MAX_CONN_ID_LEN];
@@ -688,10 +690,7 @@ struct TransferOptions {
 
 impl TransferOptions {
     fn from_matches(matches: &ArgMatches) -> Self {
-        let integrity = match matches.value_of("integrity") {
-            Some(val) => val.parse().unwrap(),
-            None => true,
-        };
+        let integrity = matches.value_of("integrity").unwrap().parse().unwrap();
 
         TransferOptions { integrity }
     }

@@ -11,6 +11,15 @@ pub fn build_cli() -> App<'static, 'static> {
                 .required(true)
                 .index(1),
         )
+        .arg(
+            Arg::with_name("congestion control")
+                .short("C")
+                .long("congestion-control")
+                .help("Which congestion control algorithm to use")
+                .takes_value(true)
+                .possible_values(&["reno", "cubic", "bbr"])
+                .default_value("bbr"),
+        )
         .subcommand(
             SubCommand::with_name("get")
                 .about("download a file")
@@ -19,7 +28,9 @@ pub fn build_cli() -> App<'static, 'static> {
                         .short("c")
                         .long("check")
                         .help("Whether to perform integrity checking")
-                        .takes_value(true),
+                        .takes_value(true)
+                        .possible_values(&["true", "false"])
+                        .default_value("true"),
                 )
                 .arg(
                     Arg::with_name("SOURCE")
@@ -42,7 +53,9 @@ pub fn build_cli() -> App<'static, 'static> {
                         .short("c")
                         .long("check")
                         .help("Whether to perform integrity checking")
-                        .takes_value(true),
+                        .takes_value(true)
+                        .possible_values(&["true", "false"])
+                        .default_value("true"),
                 )
                 .arg(
                     Arg::with_name("SOURCE")
