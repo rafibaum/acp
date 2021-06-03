@@ -467,8 +467,6 @@ impl Client {
 
 impl Inner {
     async fn send(&mut self) {
-        const PACING_WINDOW: Duration = Duration::from_millis(1);
-
         loop {
             let info = match self.connection.send(&mut self.send_buf) {
                 Ok(info) => info,
@@ -478,13 +476,8 @@ impl Inner {
 
             let (len, info) = info;
 
-            let now = Instant::now();
-            if let Some(lapsed) = info.at.checked_duration_since(now) {
-                if lapsed > PACING_WINDOW {
-                    self.congestion_time += lapsed;
-                    tokio::time::sleep_until(info.at.into()).await;
-                    self.sleep_time += now.elapsed();
-                }
+            while info.at > Instant::now() {
+                tokio::task::yield_now().await;
             }
 
             let mut to_send = &self.send_buf[..len];

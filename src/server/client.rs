@@ -569,8 +569,8 @@ impl Client {
     #[tracing::instrument(level = "trace", skip(self))]
     async fn send(&mut self) {
         loop {
-            let (len, _) = match self.connection.send(&mut self.send_buf) {
-                Ok(len) => len,
+            let info = match self.connection.send(&mut self.send_buf) {
+                Ok(info) => info,
                 Err(quiche::Error::Done) => {
                     return;
                 }
@@ -579,6 +579,12 @@ impl Client {
                     panic!("QUIC error while processing outgoing bytes");
                 }
             };
+
+            let (len, info) = info;
+
+            while info.at > Instant::now() {
+                tokio::task::yield_now().await;
+            }
 
             let mut sent = 0;
             while sent < len {
