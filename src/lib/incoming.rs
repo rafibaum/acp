@@ -42,7 +42,7 @@ pub struct Incoming {
     next_gc: Option<Instant>,
     draining_round: Option<u32>,
     piece_start: Option<Instant>,
-    piece_time: Duration,
+    piece_time: f64,
     piece_count: u64,
     rtt: Arc<AtomicU64>,
     term_tx: Sender<Terminated>,
@@ -103,7 +103,7 @@ impl Incoming {
             next_gc: None,
             draining_round: None,
             piece_start: None,
-            piece_time: Duration::from_nanos(0),
+            piece_time: 0.0,
             piece_count: 0,
             rtt,
             term_tx,
@@ -260,7 +260,7 @@ impl Incoming {
 
                 let now = Instant::now();
                 let elapsed = now - self.piece_start.unwrap();
-                self.piece_time += elapsed;
+                self.piece_time += elapsed.as_secs_f64();
             }
         };
 
@@ -328,10 +328,7 @@ impl Incoming {
 
         let rtt = self.rtt.load(Ordering::Relaxed);
 
-        let piece_avg = Duration::new(
-            self.piece_time.as_secs() / self.piece_count,
-            (self.piece_time.subsec_nanos() as u64 / self.piece_count) as u32,
-        );
+        let piece_avg = Duration::from_secs_f64(self.piece_time / self.piece_count as f64);
         let window_size = rtt / piece_avg.as_nanos() as u64;
         self.window_size = std::cmp::max(self.window_size, window_size * 2);
 
