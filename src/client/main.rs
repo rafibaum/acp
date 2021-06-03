@@ -476,8 +476,17 @@ impl Inner {
 
             let (len, info) = info;
 
-            while info.at > Instant::now() {
-                tokio::task::yield_now().await;
+            let now = Instant::now();
+            if info.at > now {
+                // Shouldn't send yet
+                self.congestion_time += info.at - now;
+
+                let start = now;
+                while info.at > Instant::now() {
+                    tokio::task::yield_now().await;
+                }
+
+                self.congestion_time += Instant::now() - start;
             }
 
             let mut to_send = &self.send_buf[..len];

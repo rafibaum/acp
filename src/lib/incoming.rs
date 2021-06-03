@@ -349,13 +349,13 @@ impl Incoming {
         self.piece_rx.resize(self.window_size as usize);
         // TODO: Handle window resizing differently
 
-        // println!(
-        //     "Window size: {}, piece_avg: {}, received: {}, lost: {}",
-        //     self.window_size,
-        //     piece_avg.as_nanos(),
-        //     self.pieces_received_count,
-        //     self.lost.len()
-        // );
+        println!(
+            "Window size: {}, piece_avg: {}, received: {}, lost: {}",
+            self.window_size,
+            piece_avg.as_nanos(),
+            self.pieces_received_count,
+            self.lost.len()
+        );
 
         let update = proto::ControlUpdate {
             id: self.id.clone(),
