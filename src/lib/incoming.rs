@@ -256,7 +256,7 @@ impl Incoming {
                 }
 
                 let offset = piece.piece * self.piece_size as u64;
-                if piece.piece % 1000 == 0 {
+                if piece.piece % 10000 == 0 {
                     println!("Received piece {}", piece.piece);
                 }
 
@@ -350,13 +350,16 @@ impl Incoming {
         self.piece_rx.resize(self.window_size as usize);
         // TODO: Handle window resizing differently
 
-        println!(
-            "Window size: {}, piece_avg: {}, received: {}, lost: {}",
-            self.window_size,
-            piece_avg.as_nanos(),
-            self.pieces_received_count,
-            self.lost.len()
-        );
+
+        if self.pieces_received_count % 5 == 0 {
+            println!(
+                "Window size: {}, piece_avg: {}, received: {}, lost: {}",
+                self.window_size,
+                piece_avg.as_nanos(),
+                self.pieces_received_count,
+                self.lost.len()
+            );
+        }
 
         let update = proto::ControlUpdate {
             id: self.id.clone(),

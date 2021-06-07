@@ -176,7 +176,7 @@ impl Inner {
             data: buf,
         }));
 
-        if piece_num % 1000 == 0 {
+        if piece_num % 10000 == 0 {
             println!("Sending piece {}", piece_num);
         }
 
