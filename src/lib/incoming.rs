@@ -342,7 +342,8 @@ impl Incoming {
 
         let rtt = self.rtt.load(Ordering::Relaxed);
 
-        let piece_avg = Duration::from_secs_f64(self.piece_time / self.piece_count as f64);
+        // let piece_avg = Duration::from_secs_f64(self.piece_time / self.piece_count as f64);
+        let piece_avg = Duration::from_nanos(2500); // TODO: Remove temp
         let window_size = rtt / piece_avg.as_nanos() as u64;
         self.window_size = std::cmp::max(self.window_size, window_size * 2);
 

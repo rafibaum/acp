@@ -486,7 +486,7 @@ impl Inner {
                     tokio::task::yield_now().await;
                 }
 
-                self.congestion_time += Instant::now() - start;
+                self.sleep_time += Instant::now() - start;
             }
 
             let mut to_send = &self.send_buf[..len];
