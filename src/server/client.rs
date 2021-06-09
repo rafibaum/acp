@@ -69,7 +69,7 @@ impl Client {
         let mut dgram_buf = BytesMut::with_capacity(router::DATAGRAM_SIZE);
         dgram_buf.resize(router::DATAGRAM_SIZE, 0);
 
-        let (out_tx, out_rx) = mpsc::channel(32);
+        let (out_tx, out_rx) = mpsc::channel(64);
 
         let (term_tx, term_rx) = mpsc::channel(32);
 
@@ -309,7 +309,7 @@ impl Client {
                     .await
                     .unwrap();
 
-                let (info_tx, info_rx) = mpsc::channel(32);
+                let (info_tx, info_rx) = mpsc::channel(64);
                 let (piece_tx, piece_rx) = resizable::resizable(4);
 
                 let incoming = incoming::Incoming::new(
@@ -377,7 +377,7 @@ impl Client {
                     .unwrap();
                 let filesize = file.metadata().await.unwrap().len();
 
-                let (tx, rx) = mpsc::channel(32);
+                let (tx, rx) = mpsc::channel(64);
                 let outgoing = outgoing::Outgoing::new(
                     download.id.clone(),
                     file.into_std().await,

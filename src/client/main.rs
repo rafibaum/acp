@@ -176,7 +176,7 @@ impl Client {
         let mut dgram_buf = BytesMut::with_capacity(65535);
         dgram_buf.resize(65535, 0);
 
-        let (out_tx, out_rx) = mpsc::channel(32);
+        let (out_tx, out_rx) = mpsc::channel(64);
 
         let (term_tx, term_rx) = mpsc::channel(32);
 
@@ -539,7 +539,7 @@ impl Inner {
             Data::AcceptUpload(upload) => {
                 let start = self.outgoing.pending.remove(&upload.id).unwrap();
 
-                let (in_tx, in_rx) = mpsc::channel(32);
+                let (in_tx, in_rx) = mpsc::channel(64);
                 self.outgoing.transfers.insert(upload.id, in_tx);
                 start.send(in_rx).unwrap();
             }
@@ -563,7 +563,7 @@ impl Inner {
             Data::AcceptDownload(download) => {
                 let start = self.incoming.pending.remove(&download.id).unwrap();
 
-                let (info_tx, info_rx) = mpsc::channel(32);
+                let (info_tx, info_rx) = mpsc::channel(64);
                 let (piece_tx, piece_rx) = resizable::resizable(4);
 
                 self.incoming
