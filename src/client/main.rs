@@ -260,7 +260,7 @@ impl Client {
                         let in_rx = start_rx.await.unwrap();
                         let outgoing = Outgoing::new(
                             id,
-                            file,
+                            file.into_std().await,
                             2048,
                             1024,
                             out_tx,

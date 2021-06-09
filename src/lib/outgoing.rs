@@ -4,8 +4,6 @@ use std::cmp::Reverse;
 use std::collections::BinaryHeap;
 
 use ring::digest;
-use tokio::fs::File;
-use tokio::io::{AsyncReadExt, AsyncSeekExt, BufReader, SeekFrom};
 use tokio::sync::mpsc::{Receiver, Sender};
 
 use crate::proto::{
@@ -14,6 +12,8 @@ use crate::proto::{
 };
 use crate::Terminated;
 use futures::FutureExt;
+use memmap::{Mmap, MmapOptions};
+use std::fs::File;
 
 /// Type for managing information relating to an outgoing file transfer.
 pub struct Outgoing {
@@ -24,7 +24,7 @@ pub struct Outgoing {
 
 struct Inner {
     id: Vec<u8>,
-    file: BufReader<File>,
+    file: Mmap,
     piece_size: u32,
     block_size: u64,
     tx: Sender<OutgoingData>,
@@ -55,10 +55,12 @@ impl Outgoing {
             None
         };
 
+        let file = unsafe { MmapOptions::new().map(&file) }.unwrap();
+
         Outgoing {
             inner: Inner {
                 id,
-                file: BufReader::new(file),
+                file,
                 piece_size,
                 block_size: block_size as u64,
                 tx,
@@ -109,47 +111,23 @@ impl Outgoing {
 
 impl Inner {
     async fn next_piece(&mut self) -> Option<(u64, Vec<u8>)> {
-        let mut buf = vec![0; self.piece_size as usize];
-
         // Identify next piece to read and seek if necessary
-        let piece = match &mut self.round {
-            Round::First { piece } => {
-                // First round pieces are read sequentially, no seeking needed
-                *piece
-            }
-
-            Round::Retransmit {
-                num: _,
-                ref mut pieces,
-            } => match pieces.pop() {
-                None => return None,
-                Some(Reverse(piece)) => {
-                    self.file
-                        .seek(SeekFrom::Start(piece * self.piece_size as u64))
-                        .await
-                        .unwrap();
-                    piece
-                }
-            },
+        let piece = match self.round.next_piece() {
+            Some(piece) => piece,
+            None => return None,
         };
 
-        // Read piece into buffer
-        let mut read = 0;
-        loop {
-            let len = self.file.read(&mut buf[read..]).await.unwrap();
-            read += len;
+        let offset = (piece * self.piece_size as u64) as usize;
+        let end = offset + self.piece_size as usize;
+        let end = std::cmp::min(end, self.file.len()); // Bound end below file size
 
-            if read >= buf.len() || len == 0 {
-                // Buffer is full or we've reached EOF
-                buf.truncate(read);
-                break;
-            }
-        }
+        // Read piece into buffer
+        let buf = self.file[offset..end].to_vec();
 
         // First round transmission calculations
         if let Round::First { piece } = &mut self.round {
             // Reached EOF
-            if read == 0 {
+            if buf.len() == 0 {
                 if *piece % self.block_size != 0 {
                     let block = (*piece / self.block_size) as u32;
                     self.finish_block(block).await;
@@ -163,10 +141,10 @@ impl Inner {
                 ctx.update(&buf);
             }
 
-            // Bump piece number
-            *piece += 1;
-            if *piece % self.block_size == 0 {
-                let block = (*piece / self.block_size - 1) as u32;
+            // If next piece will be in a new block, finish the block
+            let next_piece = *piece + 1;
+            if next_piece % self.block_size == 0 {
+                let block = (next_piece / self.block_size - 1) as u32;
                 self.finish_block(block).await;
             }
         }
@@ -265,7 +243,7 @@ impl Inner {
                 std::mem::swap(&mut pieces, &mut self.lost);
 
                 println!("Starting next round");
-                self.round.next(pieces);
+                self.round.next_round(pieces);
 
                 self.round_stall = false;
             }
@@ -308,11 +286,31 @@ impl Round {
         }
     }
 
-    fn next(&mut self, pieces: BinaryHeap<Reverse<u64>>) {
+    fn next_round(&mut self, pieces: BinaryHeap<Reverse<u64>>) {
         let next_num = self.num() + 1;
         *self = Round::Retransmit {
             num: next_num,
             pieces,
         }
+    }
+
+    fn next_piece(&mut self) -> Option<u64> {
+        let piece = match self {
+            Round::First { piece } => {
+                let cur_piece = *piece;
+                *piece += 1;
+                cur_piece
+            }
+            Round::Retransmit { pieces, .. } => {
+                let cur_piece = match pieces.pop() {
+                    Some(Reverse(piece)) => piece,
+                    None => return None,
+                };
+
+                cur_piece
+            }
+        };
+
+        Some(piece)
     }
 }

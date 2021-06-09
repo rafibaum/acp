@@ -9,6 +9,7 @@ dependencies = [
  "bytes",
  "clap",
  "futures",
+ "memmap",
  "prost",
  "prost-build",
  "quiche",
@@ -308,9 +309,9 @@ checksum = "e2abad23fbc42b3700f2f279844dc832adb2b2eb069b2df918f455c4e18cc646"
 
 [[package]]
 name = "libc"
-version = "0.2.95"
+version = "0.2.96"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "789da6d93f1b866ffe175afc5322a4d76c038605a1c3319bb57b06967ca98a36"
+checksum = "5600b4e6efc5421841a2138a6b082e07fe12f9aaa12783d50e5d13325b26b4fc"
 
 [[package]]
 name = "libm"
@@ -341,6 +342,16 @@ name = "memchr"
 version = "2.4.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "b16bd47d9e329435e309c58469fe0791c2d0d1ba96ec0954152a5ae2b04387dc"
+
+[[package]]
+name = "memmap"
+version = "0.7.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "6585fd95e7bb50d6cc31e20d4cf9afb4e2ba16c5846fc76793f11218da9c475b"
+dependencies = [
+ "libc",
+ "winapi",
+]
 
 [[package]]
 name = "mio"
@@ -523,7 +534,7 @@ dependencies = [
 [[package]]
 name = "quiche"
 version = "0.8.1"
-source = "git+https://github.com/rafibaum/quiche?branch=bbr#ce5dfc7ceadc51439c65ebf0f466004f4c02758c"
+source = "git+https://github.com/rafibaum/quiche?branch=bbr#fd7cb9b46049605144edf4d4041942e55db2eb43"
 dependencies = [
  "cmake",
  "lazy_static",

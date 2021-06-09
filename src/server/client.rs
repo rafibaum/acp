@@ -359,7 +359,7 @@ impl Client {
                 let (tx, rx) = mpsc::channel(32);
                 let outgoing = outgoing::Outgoing::new(
                     download.id.clone(),
-                    file,
+                    file.into_std().await,
                     BLOCK_SIZE,
                     PIECE_SIZE,
                     self.out_tx.clone(),
